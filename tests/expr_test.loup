@@ -1,0 +1,103 @@
+@mode(host.dual)
+
+from debug.assert import (expect, expectEq);
+from commands.expr import (parse_expression, parse_depth, parse_types, show);
+
+func shown(tokens: list[string]): string {
+    return show(parse_expression(tokens).unwrap().root);
+}
+
+func error_of(tokens: list[string]): string {
+    return parse_expression(tokens).unwrap_err();
+}
+
+func test_empty_expression_prints(): void {
+    let none: list[string] = [];
+    expectEq(shown(none), "print", "default action");
+}
+
+func test_implicit_print(): void {
+    expectEq(shown(["-name", "*.c"]), "and(name(*.c),print)", "-print added");
+    expectEq(shown(["-name", "*.c", "-print"]), "and(name(*.c),print)", "explicit -print");
+}
+
+func test_precedence(): void {
+    expectEq(shown(["-name", "a", "-o", "-name", "b", "-type", "f"]),
+        "and(or(name(a),and(name(b),type(f))),print)", "-a binds tighter than -o");
+    expectEq(shown(["(", "-name", "a", "-o", "-name", "b", ")", "-type", "d"]),
+        "and(and(or(name(a),name(b)),type(d)),print)", "parentheses");
+    expectEq(shown(["!", "-name", "a", "-a", "-not", "-empty"]),
+        "and(and(not(name(a)),not(empty)),print)", "! and -not");
+    expectEq(shown(["!", "!", "-true"]), "and(not(not(true)),print)", "double negation");
+}
+
+func test_actions_suppress_implicit_print(): void {
+    expectEq(shown(["-name", "sub", "-prune", "-o", "-print"]),
+        "or(and(name(sub),prune),print)", "prune idiom");
+    expectEq(shown(["-iname", "X", "-print0"]), "and(iname(X),print0)", "-print0");
+    expectEq(shown(["-exec", "echo", "[{}]", ";"]), "exec(echo [{}] ;)", "-exec ;");
+    expectEq(shown(["-exec", "ls", "-d", "{}", "+"]), "exec(ls -d {} +)", "-exec +");
+}
+
+func test_prune_alone_still_prints(): void {
+    expectEq(shown(["-path", "*/x", "-prune"]), "and(and(path(*/x),prune),print)", "-prune is not an action");
+}
+
+func test_global_options(): void {
+    let q = parse_expression(["-maxdepth", "2", "-mindepth", "1", "-type", "d"]).unwrap();
+    expectEq(q.max_depth, 2, "maxdepth");
+    expectEq(q.min_depth, 1, "mindepth");
+    expectEq(show(q.root), "and(and(and(true,true),type(d)),print)", "options are true");
+    let none: list[string] = [];
+    expectEq(parse_expression(none).unwrap().max_depth, -1, "no maxdepth");
+}
+
+func test_exec_batches_are_numbered(): void {
+    let q = parse_expression(["-exec", "a", "{}", "+", "-exec", "b", "{}", "+"]).unwrap();
+    expectEq(q.batches, 2, "two batches");
+}
+
+func test_help_and_version(): void {
+    expect(parse_expression(["--help"]).unwrap().help, "--help");
+    expect(parse_expression(["-version"]).unwrap().version, "-version");
+}
+
+func test_operator_errors(): void {
+    expectEq(error_of(["-o", "-name", "a"]),
+        "invalid expression; you have used a binary operator '-o' with nothing before it.", "leading -o");
+    expectEq(error_of(["-name", "a", "-o"]), "expected an expression after '-o'", "trailing -o");
+    expectEq(error_of(["-name", "a", "-a", ")"]), "expected an expression between '-a' and ')'", "-a then )");
+    expectEq(error_of(["!"]), "expected an expression after '!'", "lone !");
+    expectEq(error_of(["(", "-name", "a"]),
+        "invalid expression; I was expecting to find a ')' somewhere but did not see one.", "unclosed (");
+    expectEq(error_of(["-name", "a", ")"]), "you have too many ')'", "extra )");
+    expectEq(error_of(["(", ")"]), "invalid expression; empty parentheses are not allowed.", "empty ( )");
+}
+
+func test_primary_errors(): void {
+    expectEq(error_of(["-name"]), "missing argument to `-name'", "missing argument");
+    expectEq(error_of(["-size", "1"]), "unknown predicate `-size'", "unknown predicate");
+    expectEq(error_of(["-name", "a", "b"]), "paths must precede expression: `b'", "late path");
+    expectEq(error_of(["-exec", "echo", "{}"]), "missing argument to `-exec'", "unterminated -exec");
+    expectEq(error_of(["-exec", "echo", "{}", "x", "+"]), "missing argument to `-exec'", "+ must follow {}");
+    expectEq(error_of(["-exec", "echo", "{}", "{}", "+"]),
+        "Only one instance of {} is supported with -exec ... +", "two {} with +");
+    expectEq(error_of(["-exec", ";"]), "invalid argument `;' to `-exec'", "empty command");
+}
+
+func test_depth_argument(): void {
+    expectEq(parse_depth("-maxdepth", "12").unwrap(), 12, "number");
+    expectEq(parse_depth("-maxdepth", "-1").unwrap_err(),
+        "Expected a positive decimal integer argument to -maxdepth, but got '-1'", "negative");
+    expect(parse_depth("-mindepth", "").is_err(), "empty");
+}
+
+func test_type_argument(): void {
+    expectEq(parse_types("f").unwrap(), "f", "f");
+    expectEq(parse_types("d,f").unwrap(), "df", "list");
+    expectEq(parse_types("x").unwrap_err(), "Unknown argument to -type: x", "unknown letter");
+    expectEq(parse_types("dd").unwrap_err(), "Must separate multiple arguments to -type using: ','", "no comma");
+    expectEq(parse_types("d,").unwrap_err(),
+        "Last file type in list argument to -type is missing, i.e., list is ending on: ','", "trailing comma");
+    expect(parse_types("l").is_err(), "links cannot be told apart");
+}

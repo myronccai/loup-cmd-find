@@ -1,0 +1,236 @@
+@mode(host.dual)
+
+# Shell wildcard matching for -name, -iname and -path, as fnmatch(3) does it
+# for find: `*` matches any run of characters (including `/` and a leading
+# `.`), `?` matches one character, `[...]` matches one character from a set
+# (`[!...]` and `[^...]` negate it; ranges `a-z`; classes such as
+# `[:digit:]`), and a backslash makes the next character literal.
+
+# One compiled pattern element.
+pub struct GlobPart {
+    # "lit", "any" (?), "star" (*) or "set" ([...]).
+    pub var kind: string;
+    # The character for "lit".
+    pub var text: string;
+    # For "set": whether the set is negated, and its members: single
+    # characters and ranges as (lo, hi) pairs, and class names.
+    pub var negate: bool;
+    pub var los: list[string];
+    pub var his: list[string];
+    pub var classes: list[string];
+}
+
+const CLASS_NAMES: string = " alpha digit alnum upper lower space blank punct xdigit cntrl print graph ";
+
+func literal(ch: string): GlobPart {
+    let none: list[string] = [];
+    return GlobPart(kind = "lit", text = ch, negate = false, los = none, his = none, classes = none);
+}
+
+func simple(kind: string): GlobPart {
+    let none: list[string] = [];
+    return GlobPart(kind = kind, text = "", negate = false, los = none, his = none, classes = none);
+}
+
+func chars_of(s: string): list[string] {
+    var out: list[string] = [];
+    for (ch in s) {
+        out.push(ch);
+    }
+    return out;
+}
+
+# Whether the one-character string `ch` belongs to the POSIX class `name`
+# (ASCII only).
+pub func in_class(ch: string, name: string): bool {
+    let upper = ch >= "A" and ch <= "Z";
+    let lower = ch >= "a" and ch <= "z";
+    let digit = ch >= "0" and ch <= "9";
+    let space = ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+        or ch == str(char.of(11)) or ch == str(char.of(12));
+    let cntrl = ch < " " or ch == str(char.of(127));
+    let graph = ch > " " and ch < str(char.of(127));
+    if (name == "alpha") {
+        return upper or lower;
+    }
+    if (name == "digit") {
+        return digit;
+    }
+    if (name == "alnum") {
+        return upper or lower or digit;
+    }
+    if (name == "upper") {
+        return upper;
+    }
+    if (name == "lower") {
+        return lower;
+    }
+    if (name == "space") {
+        return space;
+    }
+    if (name == "blank") {
+        return ch == " " or ch == "\t";
+    }
+    if (name == "punct") {
+        return graph and !(upper or lower or digit);
+    }
+    if (name == "xdigit") {
+        return digit or (ch >= "a" and ch <= "f") or (ch >= "A" and ch <= "F");
+    }
+    if (name == "cntrl") {
+        return cntrl;
+    }
+    if (name == "print") {
+        return graph or ch == " ";
+    }
+    if (name == "graph") {
+        return graph;
+    }
+    return false;
+}
+
+# Parses the bracket expression that starts at `cs[start]` (the `[`). Returns
+# the set and the index just after its `]`, or index -1 when the bracket is
+# not closed (the `[` is then an ordinary character).
+func parse_set(cs: list[string], start: int, edits part: GlobPart): int {
+    var i = start + 1;
+    if (i < cs.len() and (cs[i] == "!" or cs[i] == "^")) {
+        part.negate = true;
+        i += 1;
+    }
+    var first = true;
+    while (i < cs.len()) {
+        let ch = cs[i];
+        if (ch == "]" and !first) {
+            return i + 1;
+        }
+        first = false;
+        if (ch == "[" and i + 1 < cs.len() and cs[i + 1] == ":") {
+            # A class such as [:digit:].
+            var j = i + 2;
+            var name = "";
+            while (j + 1 < cs.len() and !(cs[j] == ":" and cs[j + 1] == "]")) {
+                name += cs[j];
+                j += 1;
+            }
+            if (j + 1 < cs.len() and CLASS_NAMES.index_of(" " + name + " ") >= 0) {
+                part.classes.push(name);
+                i = j + 2;
+                continue;
+            }
+        }
+        var lo = ch;
+        if (ch == "\\" and i + 1 < cs.len()) {
+            i += 1;
+            lo = cs[i];
+        }
+        i += 1;
+        var hi = lo;
+        if (i + 1 < cs.len() and cs[i] == "-" and cs[i + 1] != "]") {
+            hi = cs[i + 1];
+            if (hi == "\\" and i + 2 < cs.len()) {
+                hi = cs[i + 2];
+                i += 1;
+            }
+            i += 2;
+        }
+        part.los.push(lo);
+        part.his.push(hi);
+    }
+    return -1;
+}
+
+# Compiles `pattern` into its elements.
+pub func compile_glob(pattern: string): list[GlobPart] {
+    let cs = chars_of(pattern);
+    var parts: list[GlobPart] = [];
+    var i = 0;
+    while (i < cs.len()) {
+        let ch = cs[i];
+        if (ch == "*") {
+            parts.push(simple("star"));
+            i += 1;
+        } else if (ch == "?") {
+            parts.push(simple("any"));
+            i += 1;
+        } else if (ch == "\\" and i + 1 < cs.len()) {
+            parts.push(literal(cs[i + 1]));
+            i += 2;
+        } else if (ch == "[") {
+            var set = simple("set");
+            let next = parse_set(cs, i, edits: set);
+            if (next < 0) {
+                parts.push(literal("["));
+                i += 1;
+            } else {
+                parts.push(set);
+                i = next;
+            }
+        } else {
+            parts.push(literal(ch));
+            i += 1;
+        }
+    }
+    return parts;
+}
+
+# Whether one non-star element matches the character `ch`.
+func part_matches(part: GlobPart, ch: string): bool {
+    if (part.kind == "any") {
+        return true;
+    }
+    if (part.kind == "lit") {
+        return part.text == ch;
+    }
+    var found = false;
+    var k = 0;
+    while (!found and k < part.los.len()) {
+        found = ch >= part.los[k] and ch <= part.his[k];
+        k += 1;
+    }
+    k = 0;
+    while (!found and k < part.classes.len()) {
+        found = in_class(ch, part.classes[k]);
+        k += 1;
+    }
+    return found != part.negate;
+}
+
+# Whether `text` matches the compiled pattern as a whole.
+pub func match_parts(parts: list[GlobPart], text: string): bool {
+    let cs = chars_of(text);
+    var p = 0;
+    var t = 0;
+    var star_p = -1;
+    var star_t = 0;
+    while (t < cs.len()) {
+        if (p < parts.len() and parts[p].kind == "star") {
+            star_p = p;
+            star_t = t;
+            p += 1;
+        } else if (p < parts.len() and part_matches(parts[p], cs[t])) {
+            p += 1;
+            t += 1;
+        } else if (star_p >= 0) {
+            # Let the last star swallow one more character and retry.
+            star_t += 1;
+            t = star_t;
+            p = star_p + 1;
+        } else {
+            return false;
+        }
+    }
+    while (p < parts.len() and parts[p].kind == "star") {
+        p += 1;
+    }
+    return p == parts.len();
+}
+
+# Whether `text` matches the wildcard `pattern`. With `fold`, letters match
+# regardless of case (-iname).
+pub func glob_match(pattern: string, text: string, fold: bool): bool {
+    if (fold) {
+        return match_parts(compile_glob(pattern.toLowerCase()), text.toLowerCase());
+    }
+    return match_parts(compile_glob(pattern), text);
+}

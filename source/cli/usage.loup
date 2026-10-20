@@ -1,28 +1,49 @@
 @mode(host.dual)
 
-from appinfo import (APP_NAME, APP_VERSION, APP_SUMMARY);
-from cli.args import (DEFAULT_GREETING);
+from appinfo import (APP_NAME, APP_VERSION);
 
 pub func usage(): string {
     let lines = [
-        i"usage: {$ APP_NAME $} [OPTIONS] COMMAND [ARGS...]",
+        i"Usage: {$ APP_NAME $} [-H] [-L] [-P] [PATH...] [EXPRESSION]",
         "",
-        APP_SUMMARY,
+        "Search the directory trees rooted at each PATH (default: the current",
+        "directory) and evaluate EXPRESSION on every file and directory, from",
+        "left to right. The default expression is -print.",
         "",
-        "Commands:",
-        "  hello [NAME]          Print a greeting (NAME defaults to 'world')",
-        "  help                  Show this help",
+        "Operators, by decreasing precedence:",
+        "  ( EXPR )              group",
+        "  ! EXPR, -not EXPR     true if EXPR is false",
+        "  EXPR1 -a EXPR2        and (also -and, or just EXPR1 EXPR2)",
+        "  EXPR1 -o EXPR2        or (also -or)",
         "",
-        "Options:",
-        i"  -g, --greeting TEXT   Greeting used by 'hello' (default: {$ DEFAULT_GREETING $})",
-        "      --shout           Print the greeting in upper case",
-        "  -v, --verbose         Print diagnostic messages to stderr",
-        "  -h, --help            Show this help and exit",
-        "  -V, --version         Show the version and exit",
+        "Global options (always true):",
+        "  -maxdepth LEVELS      descend at most LEVELS below the starting points",
+        "  -mindepth LEVELS      do not apply tests or actions above LEVELS",
+        "",
+        "Tests:",
+        "  -name PATTERN         the last component of the path matches PATTERN",
+        "  -iname PATTERN        like -name, ignoring case",
+        "  -path PATTERN         the whole path matches PATTERN",
+        "  -type f|d             a regular file or a directory (a list: f,d)",
+        "  -empty                an empty regular file or directory",
+        "  -true, -false         always true, always false",
+        "",
+        "Actions:",
+        "  -print                print the path and a newline",
+        "  -print0               print the path and a NUL byte",
+        "  -prune                do not descend into this directory (true)",
+        "  -exec COMMAND ;       run COMMAND, {} replaced by the path; true if it",
+        "                        exits with status 0",
+        "  -exec COMMAND {} +    run COMMAND once with many paths at the end",
+        "",
+        "Patterns use shell wildcards: * ? [...] [!...]; quote them.",
+        "",
+        "  -help, --help         display this help and exit",
+        "  -version, --version   output version information and exit",
     ];
     return lines.join("\n");
 }
 
 pub func version_line(): string {
-    return i"{$ APP_NAME $} {$ APP_VERSION $}";
+    return i"{$ APP_NAME $} (loup-cmd-{$ APP_NAME $}) {$ APP_VERSION $}";
 }

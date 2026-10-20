@@ -1,0 +1,354 @@
+@mode(host.dual)
+
+# The find expression: an AST of enums, and the recursive-descent parser that
+# builds it from the command-line tokens.
+#
+#   expr    := or
+#   or      := and { (-o | -or) and }
+#   and     := unary { [-a | -and] unary }      juxtaposition means -a
+#   unary   := (! | -not) unary | primary
+#   primary := ( expr ) | test | action | option
+#
+# Precedence, highest first: ( ), ! , -a, -o.
+
+pub enum Expr {
+    # -name / -iname PATTERN: the pattern and whether case is ignored.
+    Name(string, bool),
+    # -path PATTERN, matched against the whole path.
+    Path(string),
+    # -type LIST: the accepted kinds, "f" and/or "d".
+    Kind(string),
+    # -empty: an empty regular file or directory.
+    Empty,
+    # -true / -false, and the global options (always true).
+    Const(bool),
+    # -prune: true; a directory is not descended into.
+    Prune,
+    # -print and -print0.
+    Print,
+    Print0,
+    # -exec COMMAND ;   (the command words, `{}` still in them)
+    Exec(list[string]),
+    # -exec COMMAND {} +   (the words before `{}`, and the batch number)
+    ExecPlus(list[string], int),
+    Not(Expr),
+    And(Expr, Expr),
+    Or(Expr, Expr),
+}
+
+# A parsed command line expression with its global options.
+pub struct Query {
+    pub root: Expr;
+    pub min_depth: int;
+    # -1 when there is no -maxdepth.
+    pub max_depth: int;
+    # The number of `-exec ... {} +` actions (batches).
+    pub batches: int;
+    pub help: bool;
+    pub version: bool;
+}
+
+# Parser state: the tokens and a cursor, plus what the primaries record.
+pub struct Parser {
+    pub var tokens: list[string];
+    pub var pos: int;
+    pub var min_depth: int;
+    pub var max_depth: int;
+    pub var has_action: bool;
+    pub var batches: int;
+    pub var help: bool;
+    pub var version: bool;
+}
+
+func at_end(p: Parser): bool {
+    return p.pos >= p.tokens.len();
+}
+
+func peek(p: Parser): string {
+    if (p.pos >= p.tokens.len()) {
+        return "";
+    }
+    return p.tokens[p.pos];
+}
+
+func is_or(t: string): bool {
+    return t == "-o" or t == "-or";
+}
+
+func is_and(t: string): bool {
+    return t == "-a" or t == "-and";
+}
+
+func is_not(t: string): bool {
+    return t == "!" or t == "-not";
+}
+
+# Whether `t` can start an operand of -a: anything but the end, `)` and -o.
+func starts_operand(t: string): bool {
+    return t != "" and t != ")" and !is_or(t);
+}
+
+# The error after an operator that has no right-hand operand.
+func missing_operand(p: Parser, op: string): string {
+    if (peek(p) == ")") {
+        return i"expected an expression between '{$ op $}' and ')'";
+    }
+    return i"expected an expression after '{$ op $}'";
+}
+
+func parse_or(edits p: Parser): Result[Expr, string] {
+    var left = parse_and(edits: p)?;
+    while (is_or(peek(p))) {
+        let op = peek(p);
+        p.pos += 1;
+        if (at_end(p) or peek(p) == ")") {
+            return Err(missing_operand(p, op));
+        }
+        let right = parse_and(edits: p)?;
+        left = Expr.Or(left, right);
+    }
+    return Ok(left);
+}
+
+func parse_and(edits p: Parser): Result[Expr, string] {
+    var left = parse_unary(edits: p)?;
+    while (true) {
+        let t = peek(p);
+        if (is_and(t)) {
+            p.pos += 1;
+            if (at_end(p) or peek(p) == ")") {
+                return Err(missing_operand(p, t));
+            }
+        } else if (!starts_operand(t)) {
+            break;
+        }
+        let right = parse_unary(edits: p)?;
+        left = Expr.And(left, right);
+    }
+    return Ok(left);
+}
+
+func parse_unary(edits p: Parser): Result[Expr, string] {
+    let t = peek(p);
+    if (is_not(t)) {
+        p.pos += 1;
+        if (at_end(p) or peek(p) == ")") {
+            return Err(missing_operand(p, t));
+        }
+        let inner = parse_unary(edits: p)?;
+        return Ok(Expr.Not(inner));
+    }
+    return parse_primary(edits: p);
+}
+
+# The argument of option `opt`, consumed.
+func take_argument(edits p: Parser, opt: string): Result[string, string] {
+    if (at_end(p)) {
+        return Err(i"missing argument to `{$ opt $}'");
+    }
+    let value = p.tokens[p.pos];
+    p.pos += 1;
+    return Ok(value);
+}
+
+# A non-negative decimal number for -maxdepth / -mindepth.
+pub func parse_depth(opt: string, text: string): Result[int, string] {
+    var ok = text.len() > 0;
+    var value = 0;
+    for (ch in text) {
+        let d = "0123456789".index_of(ch);
+        if (d < 0) {
+            ok = false;
+        } else {
+            value = value * 10 + d;
+        }
+    }
+    if (!ok) {
+        return Err(i"Expected a positive decimal integer argument to {$ opt $}, but got '{$ text $}'");
+    }
+    return Ok(value);
+}
+
+# The -type argument: a comma-separated list of type letters.
+pub func parse_types(text: string): Result[string, string] {
+    var kinds = "";
+    var expect_letter = true;
+    for (ch in text) {
+        if (expect_letter) {
+            if (ch == "f" or ch == "d") {
+                if (kinds.index_of(ch) < 0) {
+                    kinds += ch;
+                }
+            } else if ("lpsbcD".index_of(ch) >= 0) {
+                return Err(i"-type {$ ch $} is not supported: only f and d can be told apart");
+            } else {
+                return Err(i"Unknown argument to -type: {$ ch $}");
+            }
+            expect_letter = false;
+        } else if (ch == ",") {
+            expect_letter = true;
+        } else {
+            return Err("Must separate multiple arguments to -type using: ','");
+        }
+    }
+    if (text.len() == 0) {
+        return Err("Unknown argument to -type: ");
+    }
+    if (expect_letter) {
+        return Err("Last file type in list argument to -type is missing, i.e., list is ending on: ','");
+    }
+    return Ok(kinds);
+}
+
+# The words of `-exec ... ;` or `-exec ... {} +`.
+func parse_exec(edits p: Parser): Result[Expr, string] {
+    var words: list[string] = [];
+    while (!at_end(p)) {
+        let t = p.tokens[p.pos];
+        p.pos += 1;
+        if (t == ";") {
+            if (words.len() == 0) {
+                return Err("invalid argument `;' to `-exec'");
+            }
+            return Ok(Expr.Exec(words));
+        }
+        if (t == "+" and words.len() > 0 and words[words.len() - 1] == "{}") {
+            let command = words.slice(0, words.len() - 1);
+            if (command.len() == 0) {
+                return Err("invalid argument `+' to `-exec'");
+            }
+            for (w in command) {
+                if (w.index_of("{}") >= 0) {
+                    return Err("Only one instance of {} is supported with -exec ... +");
+                }
+            }
+            let id = p.batches;
+            p.batches += 1;
+            return Ok(Expr.ExecPlus(command, id));
+        }
+        words.push(t);
+    }
+    return Err("missing argument to `-exec'");
+}
+
+func parse_primary(edits p: Parser): Result[Expr, string] {
+    let t = peek(p);
+    p.pos += 1;
+    if (t == "(") {
+        if (peek(p) == ")") {
+            return Err("invalid expression; empty parentheses are not allowed.");
+        }
+        let inner = parse_or(edits: p)?;
+        if (peek(p) != ")") {
+            return Err("invalid expression; I was expecting to find a ')' somewhere but did not see one.");
+        }
+        p.pos += 1;
+        return Ok(inner);
+    }
+    if (is_or(t) or is_and(t)) {
+        return Err(i"invalid expression; you have used a binary operator '{$ t $}' with nothing before it.");
+    }
+    if (t == "-name" or t == "-iname") {
+        let pattern = take_argument(edits: p, t)?;
+        return Ok(Expr.Name(pattern, t == "-iname"));
+    }
+    if (t == "-path") {
+        let pattern = take_argument(edits: p, t)?;
+        return Ok(Expr.Path(pattern));
+    }
+    if (t == "-type") {
+        let text = take_argument(edits: p, t)?;
+        let kinds = parse_types(text)?;
+        return Ok(Expr.Kind(kinds));
+    }
+    if (t == "-maxdepth" or t == "-mindepth") {
+        let text = take_argument(edits: p, t)?;
+        let depth = parse_depth(t, text)?;
+        if (t == "-maxdepth") {
+            p.max_depth = depth;
+        } else {
+            p.min_depth = depth;
+        }
+        return Ok(Expr.Const(true));
+    }
+    if (t == "-empty") {
+        return Ok(Expr.Empty);
+    }
+    if (t == "-true" or t == "-false") {
+        return Ok(Expr.Const(t == "-true"));
+    }
+    if (t == "-prune") {
+        return Ok(Expr.Prune);
+    }
+    if (t == "-print") {
+        p.has_action = true;
+        return Ok(Expr.Print);
+    }
+    if (t == "-print0") {
+        p.has_action = true;
+        return Ok(Expr.Print0);
+    }
+    if (t == "-exec") {
+        p.has_action = true;
+        return parse_exec(edits: p);
+    }
+    if (t == "-help" or t == "--help") {
+        p.help = true;
+        return Ok(Expr.Const(true));
+    }
+    if (t == "-version" or t == "--version") {
+        p.version = true;
+        return Ok(Expr.Const(true));
+    }
+    if (!t.startsWith("-") or t == "-") {
+        return Err(i"paths must precede expression: `{$ t $}'");
+    }
+    return Err(i"unknown predicate `{$ t $}'");
+}
+
+# Parses the expression tokens (everything after the paths). An empty
+# expression means -print; an expression without an action gets an implicit
+# -print around it: `( EXPR ) -print`.
+pub func parse_expression(tokens: list[string]): Result[Query, string] {
+    var p = Parser(tokens = tokens, pos = 0, min_depth = 0, max_depth = -1,
+        has_action = false, batches = 0, help = false, version = false);
+    var root = Expr.Print;
+    if (tokens.len() > 0) {
+        let parsed = parse_or(edits: p)?;
+        if (!at_end(p)) {
+            if (peek(p) == ")") {
+                return Err("you have too many ')'");
+            }
+            return Err(i"unexpected `{$ peek(p) $}'");
+        }
+        root = parsed;
+        if (!p.has_action) {
+            root = Expr.And(parsed, Expr.Print);
+        }
+    }
+    return Ok(Query(root = root, min_depth = p.min_depth, max_depth = p.max_depth,
+        batches = p.batches, help = p.help, version = p.version));
+}
+
+# A readable form of the tree, used by the tests: and(name(*.c),print).
+pub func show(e: Expr): string {
+    var out = "";
+    match e {
+        Name(pattern, fold) => {
+            out = if (fold) { "iname(" + pattern + ")" } else { "name(" + pattern + ")" };
+        },
+        Path(pattern) => { out = "path(" + pattern + ")"; },
+        Kind(kinds) => { out = "type(" + kinds + ")"; },
+        Empty => { out = "empty"; },
+        Const(value) => { out = if (value) { "true" } else { "false" }; },
+        Prune => { out = "prune"; },
+        Print => { out = "print"; },
+        Print0 => { out = "print0"; },
+        Exec(words) => { out = "exec(" + words.join(" ") + " ;)"; },
+        ExecPlus(words, id) => { out = "exec(" + words.join(" ") + " {} +)"; },
+        Not(inner) => { out = "not(" + show(inner) + ")"; },
+        And(a, b) => { out = "and(" + show(a) + "," + show(b) + ")"; },
+        Or(a, b) => { out = "or(" + show(a) + "," + show(b) + ")"; },
+    }
+    return out;
+}

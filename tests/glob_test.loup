@@ -1,0 +1,55 @@
+@mode(host.dual)
+
+from debug.assert import (expect);
+from commands.glob import (glob_match, in_class);
+
+func test_literal_and_question_mark(): void {
+    expect(glob_match("a.txt", "a.txt", false), "exact");
+    expect(!glob_match("a.txt", "a.txtx", false), "longer text");
+    expect(glob_match("a?c", "abc", false), "? matches one character");
+    expect(!glob_match("a?c", "ac", false), "? needs a character");
+}
+
+func test_star(): void {
+    expect(glob_match("*.txt", "notes.txt", false), "suffix");
+    expect(glob_match("*", "", false), "star matches nothing");
+    expect(glob_match("*.txt", ".hidden.txt", false), "star matches a leading dot");
+    expect(glob_match("a*b*c", "aXbYbZc", false), "backtracking");
+    expect(!glob_match("a*b*c", "aXbYbZ", false), "missing last literal");
+    expect(glob_match("*/sub/*", "g/sub/deep/c.c", false), "star matches slashes");
+}
+
+func test_brackets(): void {
+    expect(glob_match("[ab]*", "beta", false), "set");
+    expect(!glob_match("[ab]*", "gamma", false), "not in set");
+    expect(glob_match("[!t]*", "x", false), "negated with !");
+    expect(glob_match("[^t]*", "x", false), "negated with ^");
+    expect(!glob_match("[!t]*", "t", false), "negated set excludes");
+    expect(glob_match("file[0-9]", "file7", false), "range");
+    expect(!glob_match("file[0-9]", "filex", false), "outside range");
+    expect(glob_match("[]]", "]", false), "] first is literal");
+    expect(glob_match("[a-]", "-", false), "trailing - is literal");
+    expect(glob_match("[", "[", false), "unclosed [ is literal");
+    expect(glob_match("x[[:digit:]]", "x5", false), "class");
+    expect(!glob_match("x[[:digit:]]", "xa", false), "class excludes");
+    expect(glob_match("[[:upper:][:digit:]]", "Q", false), "two classes");
+}
+
+func test_backslash_escapes(): void {
+    expect(glob_match("\\*", "*", false), "escaped star");
+    expect(!glob_match("\\*", "x", false), "escaped star is literal");
+    expect(glob_match("a\\?", "a?", false), "escaped question mark");
+}
+
+func test_fold_case(): void {
+    expect(glob_match("*.TXT", "a.txt", true), "pattern upper");
+    expect(glob_match("*.txt", "B.TXT", true), "text upper");
+    expect(!glob_match("*.txt", "B.TXT", false), "case matters without fold");
+}
+
+func test_classes(): void {
+    expect(in_class("a", "alpha") and in_class("Z", "upper"), "letters");
+    expect(in_class(" ", "space") and in_class("\t", "blank"), "spaces");
+    expect(in_class("!", "punct") and !in_class("a", "punct"), "punctuation");
+    expect(in_class("f", "xdigit") and !in_class("g", "xdigit"), "hex digits");
+}

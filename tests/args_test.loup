@@ -1,64 +1,45 @@
 @mode(host.dual)
 
 from debug.assert import (expect, expectEq);
-from cli.args import (parse_args, DEFAULT_GREETING);
+from cli.args import (parse_args, starts_expression);
+from commands.expr import (show);
 
-func test_no_arguments(): void {
+func test_default_path(): void {
     let none: list[string] = [];
     let opts = parse_args(none).unwrap();
-    expectEq(opts.command, "", "no command");
-    expectEq(opts.operands.len(), 0, "no operands");
-    expectEq(opts.greeting, DEFAULT_GREETING, "default greeting");
-    expect(!opts.help and !opts.version and !opts.verbose and !opts.shout, "no flags set");
+    expectEq(opts.paths.len(), 1, "one path");
+    expectEq(opts.paths[0], ".", "current directory");
+    expectEq(opts.links, "P", "links not followed");
+    expectEq(show(opts.query.root), "print", "default expression");
 }
 
-func test_command_and_operands(): void {
-    let opts = parse_args(["hello", "Ann"]).unwrap();
-    expectEq(opts.command, "hello", "command");
-    expectEq(opts.operands.len(), 1, "one operand");
-    expectEq(opts.operands[0], "Ann", "operand");
+func test_paths_before_expression(): void {
+    let opts = parse_args(["a", "b/c", "-name", "x"]).unwrap();
+    expectEq(opts.paths.len(), 2, "two paths");
+    expectEq(opts.paths[1], "b/c", "second path");
+    expectEq(show(opts.query.root), "and(name(x),print)", "expression");
 }
 
-func test_flags_anywhere(): void {
-    let opts = parse_args(["-v", "hello", "--shout", "Ann"]).unwrap();
-    expect(opts.verbose, "verbose");
-    expect(opts.shout, "shout");
-    expectEq(opts.command, "hello", "command");
-    expectEq(opts.operands[0], "Ann", "operand");
+func test_what_starts_an_expression(): void {
+    expect(starts_expression("-name"), "option");
+    expect(starts_expression("("), "open paren");
+    expect(starts_expression("!"), "bang");
+    expect(!starts_expression("-"), "lone dash is a path");
+    expect(!starts_expression(")"), "close paren is a path");
+    expect(!starts_expression("dir"), "plain word");
 }
 
-func test_help_and_version(): void {
+func test_symlink_options(): void {
+    expectEq(parse_args(["-L", "x"]).unwrap().links, "L", "-L");
+    expectEq(parse_args(["-L", "-H", "x"]).unwrap().links, "H", "last wins");
+    expectEq(parse_args(["-P"]).unwrap().paths[0], ".", "option then default path");
+}
+
+func test_help_and_version_inside_expression(): void {
     expect(parse_args(["--help"]).unwrap().help, "--help");
-    expect(parse_args(["-h"]).unwrap().help, "-h");
-    expect(parse_args(["--version"]).unwrap().version, "--version");
-    expect(parse_args(["-V"]).unwrap().version, "-V");
+    expect(parse_args(["dir", "--version"]).unwrap().version, "--version after a path");
 }
 
-func test_value_option_forms(): void {
-    expectEq(parse_args(["-g", "Hi"]).unwrap().greeting, "Hi", "-g VALUE");
-    expectEq(parse_args(["--greeting", "Hi"]).unwrap().greeting, "Hi", "--greeting VALUE");
-    expectEq(parse_args(["--greeting=a=b"]).unwrap().greeting, "a=b", "--greeting=VALUE keeps '='");
-}
-
-func test_double_dash_ends_options(): void {
-    let opts = parse_args(["hello", "--", "--shout"]).unwrap();
-    expect(!opts.shout, "--shout after -- is an operand");
-    expectEq(opts.operands[0], "--shout", "operand");
-}
-
-func test_lone_dash_is_operand(): void {
-    let opts = parse_args(["hello", "-"]).unwrap();
-    expectEq(opts.operands[0], "-", "operand");
-}
-
-func test_unknown_option(): void {
-    expectEq(parse_args(["--nope"]).unwrap_err(), "unknown option '--nope'", "error message");
-}
-
-func test_missing_value(): void {
-    expectEq(parse_args(["-g"]).unwrap_err(), "option '-g' requires a value", "error message");
-}
-
-func test_flag_with_value(): void {
-    expectEq(parse_args(["--shout=1"]).unwrap_err(), "option '--shout' does not take a value", "error message");
+func test_errors_come_from_the_expression(): void {
+    expectEq(parse_args(["x", "-bogus"]).unwrap_err(), "unknown predicate `-bogus'", "bad predicate");
 }

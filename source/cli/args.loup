@@ -1,98 +1,52 @@
 @mode(host.dual)
 
-# Command-line parsing. Loup 1.26 has no CLI library, so arguments are
-# parsed by hand into an Options value.
+# Command-line parsing for find:
 #
-# Grammar: [OPTIONS] COMMAND [OPERANDS...]
-#   Options may appear anywhere before `--`; everything after `--` is an
-#   operand. Value options accept `--name VALUE` and `--name=VALUE`.
+#   find [-H] [-L] [-P] [PATH...] [EXPRESSION]
+#
+# The leading arguments that do not look like the start of an expression are
+# the starting points (default: `.`). The first argument that starts with `-`
+# (other than a lone `-`), or is `(` or `!`, starts the expression, which
+# commands.expr parses into a tree. `--help` and `--version` are read as
+# part of the expression, as GNU find does.
 
-pub const DEFAULT_GREETING: string = "Hello";
+from commands.expr import (Query, parse_expression);
 
 pub struct Options {
-    pub command: string;
-    pub operands: list[string];
     pub help: bool;
     pub version: bool;
-    pub verbose: bool;
-    pub shout: bool;
-    pub greeting: string;
+    # How symbolic links are treated: "P" (default), "H" or "L".
+    pub links: string;
+    pub paths: list[string];
+    pub query: Query;
+}
+
+# Whether `arg` starts the expression rather than naming a starting point.
+pub func starts_expression(arg: string): bool {
+    if (arg == "(" or arg == "!") {
+        return true;
+    }
+    return arg.len() > 1 and arg.startsWith("-");
 }
 
 pub func parse_args(argv: list[string]): Result[Options, string] {
-    var command = "";
-    var operands: list[string] = [];
-    var help = false;
-    var version = false;
-    var verbose = false;
-    var shout = false;
-    var greeting = DEFAULT_GREETING;
-    var only_operands = false;
-
     var i = 0;
-    while (i < argv.len()) {
-        let arg = argv[i];
+    # -P (the default) never follows symbolic links to directories, -H
+    # follows them for the starting points only, -L always. The last wins.
+    var links = "P";
+    while (i < argv.len() and (argv[i] == "-H" or argv[i] == "-L" or argv[i] == "-P")) {
+        links = argv[i].slice(1);
         i += 1;
-
-        if (only_operands or arg == "-" or !arg.startsWith("-")) {
-            if (command.is_empty()) {
-                command = arg;
-            } else {
-                operands.push(arg);
-            }
-            continue;
-        }
-        if (arg == "--") {
-            only_operands = true;
-            continue;
-        }
-
-        # Split `--name=value` into its name and inline value.
-        var name = arg;
-        var inline_value: Option[string] = None;
-        if (arg.startsWith("--") and arg.contains("=")) {
-            let parts = arg.split("=");
-            name = parts[0];
-            inline_value = Some(parts.slice(1).join("="));
-        }
-
-        if (name == "-g" or name == "--greeting") {
-            match inline_value {
-                Some(v) => { greeting = v; },
-                None => {
-                    if (i >= argv.len()) {
-                        return Err(i"option '{$ name $}' requires a value");
-                    }
-                    greeting = argv[i];
-                    i += 1;
-                },
-            }
-            continue;
-        }
-
-        if (inline_value.is_some()) {
-            return Err(i"option '{$ name $}' does not take a value");
-        }
-        if (name == "-h" or name == "--help") {
-            help = true;
-        } else if (name == "-V" or name == "--version") {
-            version = true;
-        } else if (name == "-v" or name == "--verbose") {
-            verbose = true;
-        } else if (name == "--shout") {
-            shout = true;
-        } else {
-            return Err(i"unknown option '{$ name $}'");
-        }
     }
-
-    return Ok(Options(
-        command = command,
-        operands = operands,
-        help = help,
-        version = version,
-        verbose = verbose,
-        shout = shout,
-        greeting = greeting,
-    ));
+    var paths: list[string] = [];
+    while (i < argv.len() and !starts_expression(argv[i])) {
+        paths.push(argv[i]);
+        i += 1;
+    }
+    if (paths.len() == 0) {
+        paths.push(".");
+    }
+    let query = parse_expression(argv.slice(i))?;
+    return Ok(Options(help = query.help, version = query.version, links = links,
+        paths = paths, query = query));
 }

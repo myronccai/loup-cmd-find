@@ -1,0 +1,383 @@
+@mode(host.dual)
+
+# find: walks each starting point depth-first, evaluates the expression on
+# every file and directory, and carries out its actions.
+#
+# The walk and the evaluator write through `State`, which either prints as it
+# goes or, for the unit tests, collects the output and the commands that
+# -exec would run.
+
+from appinfo import (EXIT_OK, EXIT_FAILURE);
+from cli.args import (Options);
+from commands.expr import (Expr, Query);
+from commands.glob import (glob_match);
+from core.shlex import (join as shell_join);
+from io.fs import (listDir, isDir, isFile, exists);
+from io.proc import (exitCode);
+
+# The most bytes of arguments one `-exec ... {} +` command line gets before
+# it is run and a new one is started.
+const BATCH_LIMIT: int = 131072;
+
+# One file or directory being looked at.
+pub struct Entry {
+    # The path as printed: the starting point joined with the names below it.
+    pub path: string;
+    # The last component, matched by -name.
+    pub name: string;
+    pub depth: int;
+    # "f" (regular file), "d" (directory) or "o" (anything else).
+    pub kind: string;
+}
+
+pub struct State {
+    # Collect output and commands instead of printing and running them.
+    pub var capture: bool;
+    pub var out: list[string];
+    pub var errors: list[string];
+    pub var commands: list[string];
+    # Set by -prune for the entry being evaluated.
+    pub var prune: bool;
+    pub var status: int;
+    # Pending `{} +` arguments, one list per batch, and their sizes in bytes.
+    pub var pending: list[list[string]];
+    pub var pending_size: list[int];
+    # The command words of each batch, filled in when it is first used.
+    pub var batch_words: list[list[string]];
+}
+
+pub func new_state(capture: bool, batches: int): State {
+    var pending: list[list[string]] = [];
+    var sizes: list[int] = [];
+    var words: list[list[string]] = [];
+    for (i in 0..batches) {
+        let none: list[string] = [];
+        pending.push(none);
+        sizes.push(0);
+        words.push(none);
+    }
+    let empty: list[string] = [];
+    return State(capture = capture, out = empty, errors = empty, commands = empty,
+        prune = false, status = EXIT_OK, pending = pending, pending_size = sizes,
+        batch_words = words);
+}
+
+func emit(edits st: State, text: string): void {
+    if (st.capture) {
+        st.out.push(text);
+    } else {
+        print(text);
+    }
+}
+
+func report(edits st: State, message: string): void {
+    st.status = EXIT_FAILURE;
+    if (st.capture) {
+        st.errors.push(message);
+    } else {
+        printErr("find: " + message);
+    }
+}
+
+# The last component of a path, as -name sees it: trailing slashes do not
+# count, and a path of slashes is "/".
+pub func base_name(path: string): string {
+    let trimmed = base_dir(path);
+    let end = trimmed.len();
+    var start = end;
+    while (start > 0 and trimmed.slice(start - 1, start) != "/") {
+        start -= 1;
+    }
+    if (start == end) {
+        return trimmed;
+    }
+    return trimmed.slice(start, end);
+}
+
+# `path` without its trailing slashes (but "/" stays "/").
+pub func base_dir(path: string): string {
+    var end = path.len();
+    while (end > 1 and path.slice(end - 1, end) == "/") {
+        end -= 1;
+    }
+    return path.slice(0, end);
+}
+
+# The path of `name` inside directory `dir`.
+pub func child_path(dir: string, name: string): string {
+    if (dir.endsWith("/")) {
+        return dir + name;
+    }
+    return dir + "/" + name;
+}
+
+# Replaces every `{}` in `word` with `path`.
+pub func substitute(word: string, path: string): string {
+    if (word.index_of("{}") < 0) {
+        return word;
+    }
+    var out = "";
+    var i = 0;
+    let n = word.len();
+    while (i < n) {
+        if (i + 1 < n and word.slice(i, i + 2) == "{}") {
+            out += path;
+            i += 2;
+        } else {
+            out += word.slice(i, i + 1);
+            i += 1;
+        }
+    }
+    return out;
+}
+
+# The command line `-exec WORDS ;` runs for `path`.
+pub func exec_argv(words: list[string], path: string): list[string] {
+    var argv: list[string] = [];
+    for (w in words) {
+        argv.push(substitute(w, path));
+    }
+    return argv;
+}
+
+# Whether `command` can be found: a name with a slash must exist, any other
+# name must be a file in a directory on PATH.
+pub func command_exists(command: string): bool {
+    if (command.index_of("/") >= 0) {
+        return isFile(command);
+    }
+    let path = env("PATH") ?? "/usr/local/bin:/usr/bin:/bin";
+    for (dir in path.split(":")) {
+        let d = if (dir == "") { "." } else { dir };
+        if (isFile(d + "/" + command)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+# Runs one command line and passes on its output. Returns its exit status,
+# or -1 when the command cannot be found.
+func run_command(edits st: State, argv: list[string]): int {
+    if (st.capture) {
+        st.commands.push(shell_join(argv));
+        return 0;
+    }
+    if (!command_exists(argv[0])) {
+        printErr("find: '" + argv[0] + "': No such file or directory");
+        return -1;
+    }
+    let r = exec(argv);
+    let code: int = r.exit_code;
+    let out = r.stdout.to_string();
+    var err = r.stderr.to_string();
+    if (out.len() > 0) {
+        print(out);
+    }
+    if (err.endsWith("\n")) {
+        err = err.slice(0, err.len() - 1);
+    }
+    if (err.len() > 0) {
+        printErr(err);
+    }
+    return code;
+}
+
+# Runs the pending command line of batch `id`, if it has any arguments.
+func flush_batch(edits st: State, id: int): void {
+    let paths = st.pending[id];
+    if (paths.len() == 0) {
+        return;
+    }
+    var argv: list[string] = [];
+    for (w in st.batch_words[id]) {
+        argv.push(w);
+    }
+    for (p in paths) {
+        argv.push(p);
+    }
+    let none: list[string] = [];
+    st.pending[id] = none;
+    st.pending_size[id] = 0;
+    if (run_command(edits: st, argv) != 0) {
+        st.status = EXIT_FAILURE;
+    }
+}
+
+# Runs every batch that still has arguments (at the end of the walk).
+pub func flush_all(edits st: State): void {
+    for (id in 0..st.pending.len()) {
+        flush_batch(edits: st, id);
+    }
+}
+
+func add_to_batch(edits st: State, words: list[string], id: int, path: string): void {
+    if (st.pending_size[id] + path.len() + 1 > BATCH_LIMIT) {
+        flush_batch(edits: st, id);
+    }
+    st.batch_words[id] = words;
+    st.pending[id].push(path);
+    st.pending_size[id] = st.pending_size[id] + path.len() + 1;
+}
+
+# Whether a directory can be listed. An empty listing is ambiguous (the
+# native runtime returns no names for a directory it cannot open), so only
+# then is `test -r` asked.
+func readable_dir(path: string): bool {
+    return exitCode(["test", "-r", path, "-a", "-x", path]) == 0;
+}
+
+# -empty: a regular file of size zero, or a directory with no entries. io.fs
+# has no stat(), and reading a file just to measure it fails on unreadable
+# files, so `test -s` is asked about regular files.
+func is_empty(entry: Entry, edits st: State): bool {
+    if (entry.kind == "d") {
+        if (list_names(entry.path).len() > 0) {
+            return false;
+        }
+        if (!st.capture and !readable_dir(entry.path)) {
+            report(edits: st, "'" + entry.path + "': Permission denied");
+            return false;
+        }
+        return true;
+    }
+    if (entry.kind == "f") {
+        return exitCode(["test", "-s", entry.path]) != 0;
+    }
+    return false;
+}
+
+# The names in a directory, sorted (GNU find uses directory order, which is
+# not reproducible).
+pub func list_names(path: string): list[string] {
+    var names: list[string] = [];
+    try {
+        names = listDir(path);
+    } catch (Exception as e) {
+        let none: list[string] = [];
+        names = none;
+    }
+    names.sort(func(a: string, b: string) => a.compareTo(b));
+    return names;
+}
+
+# Evaluates `e` for one entry, carrying out actions on the way. `-a` and `-o`
+# short-circuit, so an action runs only when everything before it is true.
+pub func evaluate(e: Expr, entry: Entry, edits st: State): bool {
+    match e {
+        Name(pattern, fold) => {
+            return glob_match(pattern, entry.name, fold);
+        },
+        Path(pattern) => {
+            return glob_match(pattern, entry.path, false);
+        },
+        Kind(kinds) => {
+            return entry.kind != "o" and kinds.index_of(entry.kind) >= 0;
+        },
+        Empty => {
+            return is_empty(entry, edits: st);
+        },
+        Const(value) => {
+            return value;
+        },
+        Prune => {
+            st.prune = true;
+            return true;
+        },
+        Print => {
+            emit(edits: st, entry.path + "\n");
+            return true;
+        },
+        Print0 => {
+            emit(edits: st, entry.path + str(char.of(0)));
+            return true;
+        },
+        Exec(words) => {
+            return run_command(edits: st, exec_argv(words, entry.path)) == 0;
+        },
+        ExecPlus(words, id) => {
+            add_to_batch(edits: st, words, id, entry.path);
+            return true;
+        },
+        Not(inner) => {
+            return !evaluate(inner, entry, edits: st);
+        },
+        And(a, b) => {
+            if (!evaluate(a, entry, edits: st)) {
+                return false;
+            }
+            return evaluate(b, entry, edits: st);
+        },
+        Or(a, b) => {
+            if (evaluate(a, entry, edits: st)) {
+                return true;
+            }
+            return evaluate(b, entry, edits: st);
+        },
+    }
+}
+
+# Whether `path` is a symbolic link. io.fs follows links and has no lstat(),
+# so `test -h` is asked; only directories need it (to avoid walking into
+# links and loops), so the cost is one process per directory.
+func is_symlink(path: string): bool {
+    return exitCode(["test", "-h", path]) == 0;
+}
+
+# The kind of `path` for -type: "f", "d" or "o". A link to a directory is
+# "o" unless links are followed.
+pub func kind_of(path: string, follow: bool): string {
+    if (isDir(path)) {
+        if (!follow and is_symlink(path)) {
+            return "o";
+        }
+        return "d";
+    }
+    if (isFile(path)) {
+        return "f";
+    }
+    return "o";
+}
+
+# Visits `path` and, unless pruned or too deep, everything below it.
+# `links` is "P" (never follow symbolic links), "H" (follow them only for
+# the starting points) or "L" (always follow them).
+func visit(q: Query, links: string, path: string, depth: int, edits st: State): void {
+    let follow = links == "L" or (links == "H" and depth == 0);
+    let entry = Entry(path = path, name = base_name(path), depth = depth, kind = kind_of(path, follow));
+    st.prune = false;
+    if (depth >= q.min_depth) {
+        evaluate(q.root, entry, edits: st);
+    }
+    if (entry.kind != "d" or st.prune or (q.max_depth >= 0 and depth >= q.max_depth)) {
+        return;
+    }
+    let names = list_names(path);
+    if (names.len() == 0 and !st.capture and !readable_dir(path)) {
+        report(edits: st, "'" + path + "': Permission denied");
+        return;
+    }
+    for (name in names) {
+        visit(q, links, child_path(path, name), depth + 1, edits: st);
+    }
+}
+
+# Walks every starting point. Missing ones are reported and skipped.
+pub func walk_all(q: Query, links: string, paths: list[string], edits st: State): void {
+    for (path in paths) {
+        if (path.endsWith("/") and isFile(base_dir(path))) {
+            report(edits: st, "'" + path + "': Not a directory");
+        } else if (!exists(path)) {
+            report(edits: st, "'" + path + "': No such file or directory");
+        } else {
+            visit(q, links, path, 0, edits: st);
+        }
+    }
+    flush_all(edits: st);
+}
+
+pub func run_find(opts: Options): int {
+    var st = new_state(false, opts.query.batches);
+    walk_all(opts.query, opts.links, opts.paths, edits: st);
+    return st.status;
+}

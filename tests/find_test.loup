@@ -1,0 +1,111 @@
+@mode(host.dual)
+
+from debug.assert import (expect, expectEq);
+from commands.expr import (parse_expression);
+from commands.find import (Entry, State, new_state, evaluate, flush_all, base_name,
+    base_dir, child_path, substitute, exec_argv);
+
+func file(path: string, depth: int): Entry {
+    return Entry(path = path, name = base_name(path), depth = depth, kind = "f");
+}
+
+func dir(path: string, depth: int): Entry {
+    return Entry(path = path, name = base_name(path), depth = depth, kind = "d");
+}
+
+# Evaluates the expression on each entry and returns everything printed.
+func run_on(tokens: list[string], entries: list[Entry]): State {
+    let q = parse_expression(tokens).unwrap();
+    var st = new_state(true, q.batches);
+    for (e in entries) {
+        evaluate(q.root, e, edits: st);
+    }
+    flush_all(edits: st);
+    return st;
+}
+
+func test_base_name(): void {
+    expectEq(base_name("a/b/c.txt"), "c.txt", "last component");
+    expectEq(base_name("dir/"), "dir", "trailing slash");
+    expectEq(base_name("plain"), "plain", "no slash");
+    expectEq(base_name("/"), "/", "root");
+    expectEq(base_name("."), ".", "dot");
+    expectEq(base_dir("a//"), "a", "slashes removed");
+}
+
+func test_child_path(): void {
+    expectEq(child_path("g", "a"), "g/a", "joined with /");
+    expectEq(child_path("g/", "a"), "g/a", "no double slash");
+    expectEq(child_path("/", "etc"), "/etc", "root");
+}
+
+func test_substitute(): void {
+    expectEq(substitute("{}", "g/a"), "g/a", "whole word");
+    expectEq(substitute("[{}]", "g/a"), "[g/a]", "inside a word");
+    expectEq(substitute("{}:{}", "x"), "x:x", "twice");
+    expectEq(substitute("{", "x"), "{", "no pair");
+    let argv = exec_argv(["mv", "{}", "{}.bak"], "f");
+    expectEq(argv.join(" "), "mv f f.bak", "argv");
+}
+
+func test_print_and_print0(): void {
+    let st = run_on(["-name", "*.c"], [file("a.c", 1), file("b.h", 1), file("c.c", 2)]);
+    expectEq(st.out.join(""), "a.c\nc.c\n", "-print");
+    let st0 = run_on(["-print0"], [file("x y", 1)]);
+    expectEq(st0.out.join(""), "x y" + str(char.of(0)), "-print0");
+}
+
+func test_type_test(): void {
+    let st = run_on(["-type", "d"], [dir("g", 0), file("g/a", 1)]);
+    expectEq(st.out.join(""), "g\n", "directories only");
+    let both = run_on(["-type", "f,d"], [dir("g", 0), file("g/a", 1)]);
+    expectEq(both.out.len(), 2, "both kinds");
+}
+
+func test_path_test(): void {
+    let st = run_on(["-path", "*/sub/*"], [dir("g/sub", 1), file("g/sub/a", 2)]);
+    expectEq(st.out.join(""), "g/sub/a\n", "path pattern");
+}
+
+func test_short_circuit(): void {
+    # The -print on the left of -o runs only for names that match it.
+    let st = run_on(["-name", "a", "-print", "-o", "-name", "b", "-print", "-print"],
+        [file("a", 1), file("b", 1), file("c", 1)]);
+    expectEq(st.out.join(""), "a\nb\nb\n", "-o and -a short-circuit");
+}
+
+func test_prune_sets_flag(): void {
+    let q = parse_expression(["-name", "skip", "-prune", "-o", "-print"]).unwrap();
+    var st = new_state(true, q.batches);
+    evaluate(q.root, dir("g/skip", 1), edits: st);
+    expect(st.prune, "pruned");
+    expectEq(st.out.len(), 0, "pruned directory not printed");
+    st.prune = false;
+    evaluate(q.root, dir("g/keep", 1), edits: st);
+    expect(!st.prune, "not pruned");
+    expectEq(st.out.join(""), "g/keep\n", "printed");
+}
+
+func test_exec_semicolon_runs_per_file(): void {
+    let st = run_on(["-exec", "echo", "[{}]", ";"], [file("a b", 1), file("c", 1)]);
+    expectEq(st.commands.len(), 2, "two commands");
+    expectEq(st.commands[0], "echo '[a b]'", "quoted");
+    expectEq(st.commands[1], "echo '[c]'", "second");
+}
+
+func test_exec_plus_batches(): void {
+    let st = run_on(["-name", "*.txt", "-exec", "wc", "-l", "{}", "+"],
+        [file("a.txt", 1), file("b.c", 1), file("c.txt", 1)]);
+    expectEq(st.commands.len(), 1, "one command");
+    expectEq(st.commands[0], "wc -l a.txt c.txt", "all paths at the end");
+}
+
+func test_exec_plus_without_matches_runs_nothing(): void {
+    let st = run_on(["-name", "zzz", "-exec", "rm", "{}", "+"], [file("a", 1)]);
+    expectEq(st.commands.len(), 0, "nothing to run");
+}
+
+func test_const(): void {
+    expectEq(run_on(["-false"], [file("a", 1)]).out.len(), 0, "-false");
+    expectEq(run_on(["-true"], [file("a", 1)]).out.len(), 1, "-true");
+}
