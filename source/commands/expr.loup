@@ -10,6 +10,18 @@
 #   primary := ( expr ) | test | action | option
 #
 # Precedence, highest first: ( ), ! , -a, -o.
+#
+# Runtime: host.dual. Compiled into the native binary build/find by
+# `make build`; `loup run source/main.loup` interprets the same code, and
+# tests/expr_test.loup exercises it under Stage0 (`make test`).
+#
+# Structure: the Expr enum (recursive: Not, And, Or hold Exprs) and the
+# Query it ends up in; the Parser state with one function per grammar rule
+# (parse_or, parse_and, parse_unary, parse_primary), each threading the
+# Parser by `edits` and returning Result so that an error leaves with `?`;
+# argument helpers for -maxdepth, -type and -exec; parse_expression, the
+# entry point, which adds the implicit -print; and show(), a printable form
+# for the tests.
 
 pub enum Expr {
     # -name / -iname PATTERN: the pattern and whether case is ignored.

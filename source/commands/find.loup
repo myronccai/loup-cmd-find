@@ -6,6 +6,21 @@
 # The walk and the evaluator write through `State`, which either prints as it
 # goes or, for the unit tests, collects the output and the commands that
 # -exec would run.
+#
+# Runtime: host.dual. Compiled into the native binary build/find by
+# `make build`; `loup run source/main.loup` interprets the same code.
+# io.fs has no lstat() or stat(), so a few facts come from child processes
+# (`test -h`, `test -r`, `test -s` through io.proc), and -exec runs its
+# commands with exec(). tests/find_test.loup exercises the evaluator in
+# capture mode under Stage0 (`make test`), which starts no processes; the
+# walk itself is covered by the e2e tests (`make e2e`).
+#
+# Structure: Entry and State; path helpers; -exec support (run_command,
+# and the `{} +` batches that collect paths until BATCH_LIMIT and are
+# flushed at the end); the file-system probes; evaluate(), which walks the
+# Expr tree with short-circuit -a and -o; then the walk itself: visit()
+# recurses through one tree, walk_all() runs every starting point and
+# flushes the batches, and run_find() ties it to the options.
 
 from appinfo import (EXIT_OK, EXIT_FAILURE);
 from cli.args import (Options);

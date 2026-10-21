@@ -9,6 +9,10 @@
 # (other than a lone `-`), or is `(` or `!`, starts the expression, which
 # commands.expr parses into a tree. `--help` and `--version` are read as
 # part of the expression, as GNU find does.
+#
+# Runtime: host.dual. Compiled into the native binary build/find by
+# `make build`; `loup run source/main.loup` interprets the same code, and
+# tests/args_test.loup exercises it under Stage0 (`make test`).
 
 from commands.expr import (Query, parse_expression);
 

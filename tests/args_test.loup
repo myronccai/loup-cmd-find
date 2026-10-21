@@ -1,5 +1,13 @@
 @mode(host.dual)
 
+# Unit tests for find's command-line parsing (source/cli/args.loup):
+# starting points, what starts an expression, -H/-L/-P, and help, version
+# and errors coming from the expression.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this file
+# with Stage0 (`loup-bootstrap test`, source/ on LOUPPATH), one test per
+# `func test_*()`. It is not part of the binary.
+
 from debug.assert import (expect, expectEq);
 from cli.args import (parse_args, starts_expression);
 from commands.expr import (show);

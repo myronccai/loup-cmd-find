@@ -5,6 +5,15 @@
 # `.`), `?` matches one character, `[...]` matches one character from a set
 # (`[!...]` and `[^...]` negate it; ranges `a-z`; classes such as
 # `[:digit:]`), and a backslash makes the next character literal.
+#
+# Runtime: host.dual. Compiled into the native binary build/find by
+# `make build`; `loup run source/main.loup` interprets the same code, and
+# tests/glob_test.loup exercises it under Stage0 (`make test`).
+#
+# Structure: compile_glob turns the pattern into a list of GlobParts
+# (parse_set reads a bracket expression); match_parts then matches them
+# left to right, remembering only the last `*` and backtracking to it, which
+# is enough for patterns with no other kind of repetition.
 
 # One compiled pattern element.
 pub struct GlobPart {
