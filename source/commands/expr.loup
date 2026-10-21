@@ -12,22 +12,29 @@
 # Precedence, highest first: ( ), ! , -a, -o.
 #
 # Runtime: host.dual. Compiled into the native binary build/find by
-# `make build`; `loup run source/main.loup` interprets the same code, and
+# `make build`; Stage0 interprets the same code for `make run`, and
 # tests/expr_test.loup exercises it under Stage0 (`make test`).
 #
 # Structure: the Expr enum (recursive: Not, And, Or hold Exprs) and the
-# Query it ends up in; the Parser state with one function per grammar rule
-# (parse_or, parse_and, parse_unary, parse_primary), each threading the
-# Parser by `edits` and returning Result so that an error leaves with `?`;
-# argument helpers for -maxdepth, -type and -exec; parse_expression, the
-# entry point, which adds the implicit -print; and show(), a printable form
-# for the tests.
+# Query it ends up in; the Parser state (a struct whose methods peek at the
+# tokens) with one function per grammar rule (parse_or, parse_and,
+# parse_unary, parse_primary), each threading the Parser by `edits` and
+# returning Result so that an error leaves with `?`; argument helpers for
+# -maxdepth, -type, -regex and -exec; parse_expression, the entry point,
+# which adds the implicit -print; and show(), a printable form for the
+# tests.
+
+from system.regex import (Regex);
+from commands.regex import (regex_syntax, translate_regex);
 
 pub enum Expr {
     # -name / -iname PATTERN: the pattern and whether case is ignored.
     Name(string, bool),
     # -path PATTERN, matched against the whole path.
     Path(string),
+    # -regex / -iregex PATTERN: the pattern as given, compiled once here
+    # (see commands/regex.loup), and whether case is ignored.
+    PathRegex(string, Regex, bool),
     # -type LIST: the accepted kinds, "f" and/or "d".
     Kind(string),
     # -empty: an empty regular file or directory.
@@ -48,19 +55,33 @@ pub enum Expr {
     Or(Expr, Expr),
 }
 
-# A parsed command line expression with its global options.
-pub struct Query {
-    pub root: Expr;
-    pub min_depth: int;
+# A parsed command line expression with its global options. A class, not
+# a struct: the Expr tree holds compiled regular expressions (class
+# values), which a struct may not hold, and a Query crosses module
+# boundaries, where native builds handle classes safely.
+pub class Query {
+    pub let root: Expr;
+    pub let min_depth: int;
     # -1 when there is no -maxdepth.
-    pub max_depth: int;
+    pub let max_depth: int;
     # The number of `-exec ... {} +` actions (batches).
-    pub batches: int;
-    pub help: bool;
-    pub version: bool;
+    pub let batches: int;
+    pub let help: bool;
+    pub let version: bool;
+
+    new(root: Expr, min_depth: int, max_depth: int, batches: int, help: bool, version: bool) {
+        this.root = root;
+        this.min_depth = min_depth;
+        this.max_depth = max_depth;
+        this.batches = batches;
+        this.help = help;
+        this.version = version;
+    }
 }
 
-# Parser state: the tokens and a cursor, plus what the primaries record.
+# Parser state: the tokens and a cursor, plus what the primaries record
+# (`syntax` is the regular-expression syntax -regextype chose for the
+# -regex tests after it).
 pub struct Parser {
     pub var tokens: list[string];
     pub var pos: int;
@@ -70,17 +91,19 @@ pub struct Parser {
     pub var batches: int;
     pub var help: bool;
     pub var version: bool;
-}
+    pub var syntax: string;
 
-func at_end(p: Parser): bool {
-    return p.pos >= p.tokens.len();
-}
-
-func peek(p: Parser): string {
-    if (p.pos >= p.tokens.len()) {
-        return "";
+    func at_end(): bool {
+        return this.pos >= this.tokens.len();
     }
-    return p.tokens[p.pos];
+
+    # The next token, or "" at the end.
+    func peek(): string {
+        if (this.pos >= this.tokens.len()) {
+            return "";
+        }
+        return this.tokens[this.pos];
+    }
 }
 
 func is_or(t: string): bool {
@@ -102,7 +125,7 @@ func starts_operand(t: string): bool {
 
 # The error after an operator that has no right-hand operand.
 func missing_operand(p: Parser, op: string): string {
-    if (peek(p) == ")") {
+    if (p.peek() == ")") {
         return i"expected an expression between '{$ op $}' and ')'";
     }
     return i"expected an expression after '{$ op $}'";
@@ -110,10 +133,10 @@ func missing_operand(p: Parser, op: string): string {
 
 func parse_or(edits p: Parser): Result[Expr, string] {
     var left = parse_and(edits: p)?;
-    while (is_or(peek(p))) {
-        let op = peek(p);
+    while (is_or(p.peek())) {
+        let op = p.peek();
         p.pos += 1;
-        if (at_end(p) or peek(p) == ")") {
+        if (p.at_end() or p.peek() == ")") {
             return Err(missing_operand(p, op));
         }
         let right = parse_and(edits: p)?;
@@ -125,10 +148,10 @@ func parse_or(edits p: Parser): Result[Expr, string] {
 func parse_and(edits p: Parser): Result[Expr, string] {
     var left = parse_unary(edits: p)?;
     while (true) {
-        let t = peek(p);
+        let t = p.peek();
         if (is_and(t)) {
             p.pos += 1;
-            if (at_end(p) or peek(p) == ")") {
+            if (p.at_end() or p.peek() == ")") {
                 return Err(missing_operand(p, t));
             }
         } else if (!starts_operand(t)) {
@@ -141,10 +164,10 @@ func parse_and(edits p: Parser): Result[Expr, string] {
 }
 
 func parse_unary(edits p: Parser): Result[Expr, string] {
-    let t = peek(p);
+    let t = p.peek();
     if (is_not(t)) {
         p.pos += 1;
-        if (at_end(p) or peek(p) == ")") {
+        if (p.at_end() or p.peek() == ")") {
             return Err(missing_operand(p, t));
         }
         let inner = parse_unary(edits: p)?;
@@ -155,7 +178,7 @@ func parse_unary(edits p: Parser): Result[Expr, string] {
 
 # The argument of option `opt`, consumed.
 func take_argument(edits p: Parser, opt: string): Result[string, string] {
-    if (at_end(p)) {
+    if (p.at_end()) {
         return Err(i"missing argument to `{$ opt $}'");
     }
     let value = p.tokens[p.pos];
@@ -212,10 +235,24 @@ pub func parse_types(text: string): Result[string, string] {
     return Ok(kinds);
 }
 
+# The -regex test for `pattern`: translated and compiled now, so that a bad
+# pattern stops find before it walks anything.
+pub func compile_regex(pattern: string, syntax: string, fold: bool): Result[Expr, string] {
+    let source = translate_regex(pattern, syntax, fold);
+    if (source.is_err()) {
+        return Err(i"failed to compile regular expression '{$ pattern $}': " + source.unwrap_err());
+    }
+    let compiled = Regex.compile(source.unwrap());
+    if (compiled.is_err()) {
+        return Err(i"failed to compile regular expression '{$ pattern $}': Invalid regular expression");
+    }
+    return Ok(Expr.PathRegex(pattern, compiled.unwrap(), fold));
+}
+
 # The words of `-exec ... ;` or `-exec ... {} +`.
 func parse_exec(edits p: Parser): Result[Expr, string] {
     var words: list[string] = [];
-    while (!at_end(p)) {
+    while (!p.at_end()) {
         let t = p.tokens[p.pos];
         p.pos += 1;
         if (t == ";") {
@@ -224,7 +261,7 @@ func parse_exec(edits p: Parser): Result[Expr, string] {
             }
             return Ok(Expr.Exec(words));
         }
-        if (t == "+" and words.len() > 0 and words[words.len() - 1] == "{}") {
+        if (t == "+" and words.len() > 0 and words[-1] == "{}") {
             let command = words.slice(0, words.len() - 1);
             if (command.len() == 0) {
                 return Err("invalid argument `+' to `-exec'");
@@ -244,14 +281,14 @@ func parse_exec(edits p: Parser): Result[Expr, string] {
 }
 
 func parse_primary(edits p: Parser): Result[Expr, string] {
-    let t = peek(p);
+    let t = p.peek();
     p.pos += 1;
     if (t == "(") {
-        if (peek(p) == ")") {
+        if (p.peek() == ")") {
             return Err("invalid expression; empty parentheses are not allowed.");
         }
         let inner = parse_or(edits: p)?;
-        if (peek(p) != ")") {
+        if (p.peek() != ")") {
             return Err("invalid expression; I was expecting to find a ')' somewhere but did not see one.");
         }
         p.pos += 1;
@@ -272,6 +309,15 @@ func parse_primary(edits p: Parser): Result[Expr, string] {
         let text = take_argument(edits: p, t)?;
         let kinds = parse_types(text)?;
         return Ok(Expr.Kind(kinds));
+    }
+    if (t == "-regex" or t == "-iregex") {
+        let pattern = take_argument(edits: p, t)?;
+        return compile_regex(pattern, p.syntax, t == "-iregex");
+    }
+    if (t == "-regextype") {
+        let name = take_argument(edits: p, t)?;
+        p.syntax = regex_syntax(name)?;
+        return Ok(Expr.Const(true));
     }
     if (t == "-maxdepth" or t == "-mindepth") {
         let text = take_argument(edits: p, t)?;
@@ -323,23 +369,22 @@ func parse_primary(edits p: Parser): Result[Expr, string] {
 # -print around it: `( EXPR ) -print`.
 pub func parse_expression(tokens: list[string]): Result[Query, string] {
     var p = Parser(tokens = tokens, pos = 0, min_depth = 0, max_depth = -1,
-        has_action = false, batches = 0, help = false, version = false);
+        has_action = false, batches = 0, help = false, version = false, syntax = "emacs");
     var root = Expr.Print;
     if (tokens.len() > 0) {
         let parsed = parse_or(edits: p)?;
-        if (!at_end(p)) {
-            if (peek(p) == ")") {
+        if (!p.at_end()) {
+            if (p.peek() == ")") {
                 return Err("you have too many ')'");
             }
-            return Err(i"unexpected `{$ peek(p) $}'");
+            return Err(i"unexpected `{$ p.peek() $}'");
         }
         root = parsed;
         if (!p.has_action) {
             root = Expr.And(parsed, Expr.Print);
         }
     }
-    return Ok(Query(root = root, min_depth = p.min_depth, max_depth = p.max_depth,
-        batches = p.batches, help = p.help, version = p.version));
+    return Ok(Query(root, p.min_depth, p.max_depth, p.batches, p.help, p.version));
 }
 
 # A readable form of the tree, used by the tests: and(name(*.c),print).
@@ -350,6 +395,9 @@ pub func show(e: Expr): string {
             out = if (fold) { "iname(" + pattern + ")" } else { "name(" + pattern + ")" };
         },
         Path(pattern) => { out = "path(" + pattern + ")"; },
+        PathRegex(pattern, re, fold) => {
+            out = if (fold) { "iregex(" + pattern + ")" } else { "regex(" + pattern + ")" };
+        },
         Kind(kinds) => { out = "type(" + kinds + ")"; },
         Empty => { out = "empty"; },
         Const(value) => { out = if (value) { "true" } else { "false" }; },

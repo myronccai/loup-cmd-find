@@ -109,3 +109,13 @@ func test_type_argument(): void {
         "Last file type in list argument to -type is missing, i.e., list is ending on: ','", "trailing comma");
     expect(parse_types("l").is_err(), "links cannot be told apart");
 }
+
+func test_regex_tests(): void {
+    expectEq(shown(["-regex", ".*\\.c"]), "and(regex(.*\\.c),print)", "-regex");
+    expectEq(shown(["-iregex", "x"]), "and(iregex(x),print)", "-iregex");
+    expectEq(shown(["-regextype", "posix-extended", "-regex", "a|b"]), "and(and(true,regex(a|b)),print)", "-regextype is always true");
+    expectEq(error_of(["-regex", "\\("]), "failed to compile regular expression '\\(': Unmatched ( or \\(", "bad pattern");
+    expectEq(error_of(["-regex"]), "missing argument to `-regex'", "no pattern");
+    expectEq(error_of(["-regextype"]), "missing argument to `-regextype'", "no type");
+    expect(error_of(["-regextype", "foo"]).startsWith("Unknown regular expression type 'foo'"), "bad type");
+}

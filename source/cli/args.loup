@@ -11,18 +11,27 @@
 # part of the expression, as GNU find does.
 #
 # Runtime: host.dual. Compiled into the native binary build/find by
-# `make build`; `loup run source/main.loup` interprets the same code, and
+# `make build`; Stage0 interprets the same code for `make run`, and
 # tests/args_test.loup exercises it under Stage0 (`make test`).
 
 from commands.expr import (Query, parse_expression);
 
-pub struct Options {
-    pub help: bool;
-    pub version: bool;
+# The parsed command line. A class because it holds the Query (a class).
+pub class Options {
+    pub let help: bool;
+    pub let version: bool;
     # How symbolic links are treated: "P" (default), "H" or "L".
-    pub links: string;
-    pub paths: list[string];
-    pub query: Query;
+    pub let links: string;
+    pub let paths: list[string];
+    pub let query: Query;
+
+    new(links: string, paths: list[string], query: Query) {
+        this.help = query.help;
+        this.version = query.version;
+        this.links = links;
+        this.paths = paths;
+        this.query = query;
+    }
 }
 
 # Whether `arg` starts the expression rather than naming a starting point.
@@ -51,6 +60,5 @@ pub func parse_args(argv: list[string]): Result[Options, string] {
         paths.push(".");
     }
     let query = parse_expression(argv.slice(i))?;
-    return Ok(Options(help = query.help, version = query.version, links = links,
-        paths = paths, query = query));
+    return Ok(Options(links, paths, query));
 }

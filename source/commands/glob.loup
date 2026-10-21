@@ -7,7 +7,7 @@
 # `[:digit:]`), and a backslash makes the next character literal.
 #
 # Runtime: host.dual. Compiled into the native binary build/find by
-# `make build`; `loup run source/main.loup` interprets the same code, and
+# `make build`; Stage0 interprets the same code for `make run`, and
 # tests/glob_test.loup exercises it under Stage0 (`make test`).
 #
 # Structure: compile_glob turns the pattern into a list of GlobParts
@@ -21,11 +21,10 @@ pub struct GlobPart {
     pub var kind: string;
     # The character for "lit".
     pub var text: string;
-    # For "set": whether the set is negated, and its members: single
-    # characters and ranges as (lo, hi) pairs, and class names.
+    # For "set": whether the set is negated, and its members: ranges as
+    # (lo, hi) pairs (a single character c is (c, c)), and class names.
     pub var negate: bool;
-    pub var los: list[string];
-    pub var his: list[string];
+    pub var ranges: list[(string, string)];
     pub var classes: list[string];
 }
 
@@ -33,12 +32,14 @@ const CLASS_NAMES: string = " alpha digit alnum upper lower space blank punct xd
 
 func literal(ch: string): GlobPart {
     let none: list[string] = [];
-    return GlobPart(kind = "lit", text = ch, negate = false, los = none, his = none, classes = none);
+    let no_ranges: list[(string, string)] = [];
+    return GlobPart(kind = "lit", text = ch, negate = false, ranges = no_ranges, classes = none);
 }
 
 func simple(kind: string): GlobPart {
     let none: list[string] = [];
-    return GlobPart(kind = kind, text = "", negate = false, los = none, his = none, classes = none);
+    let no_ranges: list[(string, string)] = [];
+    return GlobPart(kind = kind, text = "", negate = false, ranges = no_ranges, classes = none);
 }
 
 func chars_of(s: string): list[string] {
@@ -143,8 +144,7 @@ func parse_set(cs: list[string], start: int, edits part: GlobPart): int {
             }
             i += 2;
         }
-        part.los.push(lo);
-        part.his.push(hi);
+        part.ranges.push((lo, hi));
     }
     return -1;
 }
@@ -192,12 +192,13 @@ func part_matches(part: GlobPart, ch: string): bool {
         return part.text == ch;
     }
     var found = false;
-    var k = 0;
-    while (!found and k < part.los.len()) {
-        found = ch >= part.los[k] and ch <= part.his[k];
-        k += 1;
+    for ((lo, hi) in part.ranges) {
+        if (ch >= lo and ch <= hi) {
+            found = true;
+            break;
+        }
     }
-    k = 0;
+    var k = 0;
     while (!found and k < part.classes.len()) {
         found = in_class(ch, part.classes[k]);
         k += 1;

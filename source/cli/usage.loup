@@ -4,7 +4,7 @@
 # version_line() by -version/--version.
 #
 # Runtime: host.dual. Compiled into the native binary build/find by
-# `make build`; `loup run source/main.loup` interprets the same code.
+# `make build`; Stage0 interprets the same code for `make run`.
 
 from appinfo import (APP_NAME, APP_VERSION);
 
@@ -25,11 +25,15 @@ pub func usage(): string {
         "Global options (always true):",
         "  -maxdepth LEVELS      descend at most LEVELS below the starting points",
         "  -mindepth LEVELS      do not apply tests or actions above LEVELS",
+        "  -regextype TYPE       syntax of later -regex tests: emacs (the default)",
+        "                        or posix-extended",
         "",
         "Tests:",
         "  -name PATTERN         the last component of the path matches PATTERN",
         "  -iname PATTERN        like -name, ignoring case",
         "  -path PATTERN         the whole path matches PATTERN",
+        "  -regex PATTERN        the whole path matches the regular expression",
+        "  -iregex PATTERN       like -regex, ignoring case",
         "  -type f|d             a regular file or a directory (a list: f,d)",
         "  -empty                an empty regular file or directory",
         "  -true, -false         always true, always false",

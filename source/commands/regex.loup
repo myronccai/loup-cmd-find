@@ -1,0 +1,415 @@
+@mode(host.dual)
+
+# Regular expressions for -regex and -iregex: the two syntaxes GNU find
+# users write, translated into the syntax system.regex compiles. As in GNU
+# find, a pattern must match the whole path, so the translation is wrapped
+# in `^(?:...)$`.
+#
+# - emacs (GNU's default, also called findutils-default): `\(` `\)` group
+#   and `\|` separates alternatives; `*`, `+` and `?` repeat; `(`, `)`, `|`,
+#   `{` and `}` are ordinary characters; there are no intervals and no
+#   [:classes:]; a repetition operator with nothing before it (at the start
+#   of the pattern, of a group or of an alternative) is ordinary, and `^`
+#   and `$` anchor only at those edges.
+# - posix-extended (also posix-egrep and egrep): `(`, `)`, `|`, `{m,n}`,
+#   `+` and `?` are operators, `\` makes the next character ordinary, `^`
+#   and `$` always anchor, and sets take classes such as [:digit:]. An
+#   unmatched `)` is ordinary.
+#
+# In both, `.` matches any character, `[...]` is a set in which a backslash
+# is ordinary, and GNU's escapes \w \W \s \S \b \B \< \> \` \' work. GNU's
+# back-references (\1 to \9) have no equivalent in system.regex and are
+# refused. With -iregex the letters of the pattern are lowered here and the
+# path is lowered before matching (system.regex has no case-insensitive
+# flag).
+#
+# Runtime: host.dual. Compiled into the native binary build/find by
+# `make build`; Stage0 interprets the same code for `make run`, and
+# tests/regex_test.loup exercises it under Stage0 (`make test`).
+#
+# Structure: regex_syntax() maps a -regextype name to "emacs" or "ere";
+# the RegexTranslator class makes one left-to-right pass over the pattern,
+# appending translated pieces tagged with a kind, so that a later `*`, `^`
+# or `$` can tell from the piece before it whether it is an operator;
+# translate_regex() runs it and wraps the result.
+
+pub const BACKREF_MESSAGE: string = "back-references (\\1 to \\9) are not supported";
+
+# The -regextype names GNU find accepts, in the order its message lists
+# them.
+const GNU_TYPES: string = "findutils-default ed emacs gnu-awk grep posix-awk awk posix-basic posix-egrep egrep posix-extended posix-minimal-basic sed";
+
+# Kinds of translated pieces (as in loup-cmd-sed's pattern.loup).
+const ATOM: int = 0;        # a character, `.`, a set or a group: can be repeated
+const QUANTIFIED: int = 1;  # an atom with a repetition operator attached
+const ANCHOR: int = 2;      # ^ $ \b \B
+const OPEN: int = 3;        # the start of a group, and of the pattern
+const ALT: int = 4;         # |
+
+const DIGITS: string = "0123456789";
+const LETTERS: string = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+# The syntax a -regextype name selects: "emacs" or "ere", or GNU's message.
+pub func regex_syntax(name: string): Result[string, string] {
+    if (name == "findutils-default" or name == "emacs") {
+        return Ok("emacs");
+    }
+    if (name == "posix-extended" or name == "posix-egrep" or name == "egrep") {
+        return Ok("ere");
+    }
+    if (GNU_TYPES.split(" ").contains(name)) {
+        return Err(i"-regextype {$ name $} is not supported: use emacs (the default) or posix-extended");
+    }
+    let listed: list[string] = ["'" + t + "'" for t in GNU_TYPES.split(" ")];
+    return Err(i"Unknown regular expression type '{$ name $}'; valid types are " + listed.join(", ") + ".");
+}
+
+# `ch` as an ordinary character in system.regex syntax, inside or outside a
+# set: letters, digits, `_` and non-ASCII characters as themselves
+# (system.regex rejects `\_`), any other ASCII character escaped.
+pub func ordinary(ch: string): string {
+    if (ch == "_" or LETTERS.index_of(ch) >= 0 or DIGITS.index_of(ch) >= 0 or ch.byteLength() > 1) {
+        return ch;
+    }
+    return "\\" + ch;
+}
+
+# The members of a POSIX class as system.regex set text (ASCII only), or ""
+# for an unknown name.
+pub func class_members(name: string): string {
+    if (name == "alpha") {
+        return "A-Za-z";
+    }
+    if (name == "digit") {
+        return "0-9";
+    }
+    if (name == "alnum") {
+        return "0-9A-Za-z";
+    }
+    if (name == "upper") {
+        return "A-Z";
+    }
+    if (name == "lower") {
+        return "a-z";
+    }
+    if (name == "space") {
+        return "\\x09-\\x0D ";
+    }
+    if (name == "blank") {
+        return "\\x09 ";
+    }
+    if (name == "punct") {
+        return "\\!-\\/\\:-\\@\\[-\\`\\{-\\~";
+    }
+    if (name == "xdigit") {
+        return "0-9A-Fa-f";
+    }
+    if (name == "print") {
+        return " -~";
+    }
+    if (name == "graph") {
+        return "!-~";
+    }
+    if (name == "cntrl") {
+        return "\\x00-\\x1F\\x7F";
+    }
+    return "";
+}
+
+class RegexTranslator {
+    let chars: list[string];
+    let ere: bool;
+    let fold: bool;
+    var pos: int = 0;
+    var pieces: list[string] = [];
+    var kinds: list[int] = [];
+    var opens: list[int] = [];
+    pub var err: string = "";
+
+    new(pattern: string, ere: bool, fold: bool) {
+        this.chars = [];
+        for (ch in pattern) {
+            this.chars.push(ch);
+        }
+        this.ere = ere;
+        this.fold = fold;
+    }
+
+    func at_end(): bool {
+        return this.pos >= this.chars.len();
+    }
+
+    # The character `ahead` places on, or "" past the end.
+    func peek(ahead: int): string {
+        let at = this.pos + ahead;
+        return if (at < this.chars.len()) { this.chars[at] } else { "" };
+    }
+
+    # The kind of the last piece; the start of the pattern counts as OPEN.
+    func last_kind(): int {
+        if (this.kinds.len() == 0) {
+            return OPEN;
+        }
+        return this.kinds[-1];
+    }
+
+    modifier func add(piece: string, kind: int): void {
+        this.pieces.push(piece);
+        this.kinds.push(kind);
+    }
+
+    modifier func fail(message: string): void {
+        if (this.err == "") {
+            this.err = message;
+        }
+    }
+
+    # A character that stands for itself (lowered for -iregex).
+    modifier func literal(ch: string): void {
+        this.add(ordinary(if (this.fold) { ch.toLowerCase() } else { ch }), ATOM);
+    }
+
+    # `*`, `+` or `?`. Attached to a piece that already repeats, the piece
+    # is wrapped first (`a**` must compile). With nothing to repeat, emacs
+    # syntax reads it as an ordinary character and GNU's ERE refuses it.
+    modifier func repeat(op: string): void {
+        let k = this.last_kind();
+        if (k == ATOM or k == QUANTIFIED) {
+            let last = this.pieces.len() - 1;
+            if (k == QUANTIFIED) {
+                this.pieces[last] = "(?:" + this.pieces[last] + ")";
+            }
+            this.pieces[last] = this.pieces[last] + op;
+            this.kinds[last] = QUANTIFIED;
+        } else if (this.ere) {
+            this.fail("Invalid preceding regular expression");
+        } else {
+            this.literal(op);
+        }
+    }
+
+    modifier func open_group(): void {
+        this.opens.push(this.pieces.len());
+        this.add("(", OPEN);
+    }
+
+    # Collapses the innermost open group into one atom, so that a repetition
+    # after it repeats the whole group.
+    modifier func close_group(): void {
+        let start = this.opens.pop();
+        var inner = "";
+        var i = start + 1;
+        while (i < this.pieces.len()) {
+            inner += this.pieces[i];
+            i += 1;
+        }
+        while (this.pieces.len() > start) {
+            this.pieces.pop();
+            this.kinds.pop();
+        }
+        this.add("(?:" + inner + ")", ATOM);
+    }
+
+    # `{m}`, `{m,}` or `{m,n}` after `{` in ERE.
+    modifier func interval(): void {
+        var text = "";
+        while (!this.at_end() and this.peek(0) != "}") {
+            text += this.chars[this.pos];
+            this.pos += 1;
+        }
+        if (this.at_end()) {
+            this.fail("Unmatched \\{");
+            return;
+        }
+        this.pos += 1;
+        let parts = text.split(",");
+        var valid = parts.len() <= 2 and parts[0].len() > 0;
+        for (part in parts) {
+            for (ch in part) {
+                if (DIGITS.index_of(ch) < 0) {
+                    valid = false;
+                }
+            }
+        }
+        if (!valid) {
+            this.fail("Invalid content of \\{\\}");
+            return;
+        }
+        let k = this.last_kind();
+        if (k != ATOM and k != QUANTIFIED) {
+            this.fail("Invalid preceding regular expression");
+            return;
+        }
+        this.repeat("{" + text + "}");
+    }
+
+    # A set; `pos` is just after its `[`. Members are copied as ordinary
+    # characters and ranges; in ERE, [:name:] adds a class, and [.c.] and
+    # [=c=] stand for the character c.
+    modifier func set(): void {
+        var members = "";
+        var negate = false;
+        if (this.peek(0) == "^") {
+            negate = true;
+            this.pos += 1;
+        }
+        var first = true;
+        while (true) {
+            if (this.at_end()) {
+                this.fail("Unmatched [, [^, [:, [., or [=");
+                return;
+            }
+            var ch = this.chars[this.pos];
+            this.pos += 1;
+            if (ch == "]" and !first) {
+                break;
+            }
+            first = false;
+            let kind = this.peek(0);
+            if (this.ere and ch == "[" and (kind == ":" or kind == "." or kind == "=")) {
+                var name = "";
+                var i = this.pos + 1;
+                while (i + 1 < this.chars.len() and !(this.chars[i] == kind and this.chars[i + 1] == "]")) {
+                    name += this.chars[i];
+                    i += 1;
+                }
+                if (i + 1 >= this.chars.len()) {
+                    this.fail("Unmatched [, [^, [:, [., or [=");
+                    return;
+                }
+                this.pos = i + 2;
+                if (kind == ":") {
+                    let found = class_members(name);
+                    if (found == "") {
+                        this.fail("Invalid character class name");
+                        return;
+                    }
+                    members += found;
+                    continue;
+                }
+                ch = name;
+            }
+            # A range lo-hi; a `-` just before the closing `]` is ordinary.
+            if (this.peek(0) == "-" and this.peek(1) != "" and this.peek(1) != "]") {
+                let hi = this.peek(1);
+                this.pos += 2;
+                if (hi < ch) {
+                    this.fail("Invalid range end");
+                    return;
+                }
+                members += ordinary(ch) + "-" + ordinary(hi);
+            } else {
+                members += ordinary(ch);
+            }
+        }
+        if (this.fold) {
+            members = members.toLowerCase();
+        }
+        this.add("[" + (if (negate) { "^" } else { "" }) + members + "]", ATOM);
+    }
+
+    # `^`: an anchor in ERE, and in emacs syntax only where an expression
+    # starts.
+    modifier func caret(): void {
+        let k = this.last_kind();
+        if (this.ere or k == OPEN or k == ALT) {
+            this.add("^", ANCHOR);
+        } else {
+            this.literal("^");
+        }
+    }
+
+    # `$`: an anchor in ERE, and in emacs syntax only where an expression
+    # ends (the end of the pattern, `\)` or `\|`).
+    modifier func dollar(): void {
+        let ends = this.at_end() or (this.peek(0) == "\\" and (this.peek(1) == ")" or this.peek(1) == "|"));
+        if (this.ere or ends) {
+            this.add("$", ANCHOR);
+        } else {
+            this.literal("$");
+        }
+    }
+
+    # A backslash and the character after it.
+    modifier func escape(): void {
+        if (this.at_end()) {
+            this.fail("Trailing backslash");
+            return;
+        }
+        let ch = this.chars[this.pos];
+        this.pos += 1;
+        if (!this.ere and ch == "(") {
+            this.open_group();
+        } else if (!this.ere and ch == ")") {
+            if (this.opens.len() == 0) {
+                this.fail("Unmatched ) or \\)");
+            } else {
+                this.close_group();
+            }
+        } else if (!this.ere and ch == "|") {
+            this.add("|", ALT);
+        } else if (ch != "0" and DIGITS.index_of(ch) >= 0) {
+            this.fail(BACKREF_MESSAGE);
+        } else if ("wWsSbB".index_of(ch) >= 0) {
+            let kind = if (ch == "b" or ch == "B") { ANCHOR } else { ATOM };
+            this.add("\\" + ch, kind);
+        } else if (ch == "<" or ch == ">") {
+            this.add("\\b", ANCHOR);
+        } else if (ch == "`") {
+            this.add("^", ANCHOR);
+        } else if (ch == "'") {
+            this.add("$", ANCHOR);
+        } else {
+            this.literal(ch);
+        }
+    }
+
+    # The whole pass; returns the translation, or "" with `err` set.
+    pub modifier func run(): string {
+        while (this.err == "" and !this.at_end()) {
+            let ch = this.chars[this.pos];
+            this.pos += 1;
+            if (ch == "\\") {
+                this.escape();
+            } else if (ch == "[") {
+                this.set();
+            } else if (ch == ".") {
+                this.add(".", ATOM);
+            } else if (ch == "*" or ch == "+" or ch == "?") {
+                this.repeat(ch);
+            } else if (ch == "^") {
+                this.caret();
+            } else if (ch == "$") {
+                this.dollar();
+            } else if (this.ere and ch == "(") {
+                this.open_group();
+            } else if (this.ere and ch == ")" and this.opens.len() > 0) {
+                this.close_group();
+            } else if (this.ere and ch == "|") {
+                this.add("|", ALT);
+            } else if (this.ere and ch == "{") {
+                this.interval();
+            } else {
+                this.literal(ch);
+            }
+        }
+        if (this.err == "" and this.opens.len() > 0) {
+            this.fail("Unmatched ( or \\(");
+        }
+        return this.pieces.join("");
+    }
+}
+
+# `pattern` in system.regex syntax, anchored at both ends, or GNU's reason
+# why it is not a valid regular expression. `syntax` is "emacs" or "ere".
+pub func translate_regex(pattern: string, syntax: string, fold: bool): Result[string, string] {
+    let t = RegexTranslator(pattern, syntax == "ere", fold);
+    var body = "";
+    safe {
+        body = t.run();
+    }
+    if (t.err != "") {
+        return Err(t.err);
+    }
+    return Ok("^(?:" + body + ")$");
+}

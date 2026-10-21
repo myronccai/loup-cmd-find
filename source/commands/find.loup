@@ -8,7 +8,7 @@
 # -exec would run.
 #
 # Runtime: host.dual. Compiled into the native binary build/find by
-# `make build`; `loup run source/main.loup` interprets the same code.
+# `make build`; Stage0 interprets the same code for `make run`.
 # io.fs has no lstat() or stat(), so a few facts come from child processes
 # (`test -h`, `test -r`, `test -s` through io.proc), and -exec runs its
 # commands with exec(). tests/find_test.loup exercises the evaluator in
@@ -29,6 +29,11 @@ from commands.glob import (glob_match);
 from core.shlex import (join as shell_join);
 from io.fs import (listDir, isDir, isFile, exists);
 from io.proc import (exitCode);
+
+# The words of a command line to run: an -exec command, or one built from
+# it. (A `pub type` imported into a module other than the entry file is
+# "undefined" to Stage0 in Loup 1.26.0, so the alias lives here.)
+type CommandLine = list[string];
 
 # The most bytes of arguments one `-exec ... {} +` command line gets before
 # it is run and a new one is started.
@@ -58,13 +63,13 @@ pub struct State {
     pub var pending: list[list[string]];
     pub var pending_size: list[int];
     # The command words of each batch, filled in when it is first used.
-    pub var batch_words: list[list[string]];
+    pub var batch_words: list[CommandLine];
 }
 
 pub func new_state(capture: bool, batches: int): State {
     var pending: list[list[string]] = [];
     var sizes: list[int] = [];
-    var words: list[list[string]] = [];
+    var words: list[CommandLine] = [];
     for (i in 0..batches) {
         let none: list[string] = [];
         pending.push(none);
@@ -147,8 +152,8 @@ pub func substitute(word: string, path: string): string {
 }
 
 # The command line `-exec WORDS ;` runs for `path`.
-pub func exec_argv(words: list[string], path: string): list[string] {
-    var argv: list[string] = [];
+pub func exec_argv(words: CommandLine, path: string): CommandLine {
+    var argv: CommandLine = [];
     for (w in words) {
         argv.push(substitute(w, path));
     }
@@ -173,7 +178,7 @@ pub func command_exists(command: string): bool {
 
 # Runs one command line and passes on its output. Returns its exit status,
 # or -1 when the command cannot be found.
-func run_command(edits st: State, argv: list[string]): int {
+func run_command(edits st: State, argv: CommandLine): int {
     if (st.capture) {
         st.commands.push(shell_join(argv));
         return 0;
@@ -204,13 +209,7 @@ func flush_batch(edits st: State, id: int): void {
     if (paths.len() == 0) {
         return;
     }
-    var argv: list[string] = [];
-    for (w in st.batch_words[id]) {
-        argv.push(w);
-    }
-    for (p in paths) {
-        argv.push(p);
-    }
+    let argv: CommandLine = st.batch_words[id] + paths;
     let none: list[string] = [];
     st.pending[id] = none;
     st.pending_size[id] = 0;
@@ -226,7 +225,7 @@ pub func flush_all(edits st: State): void {
     }
 }
 
-func add_to_batch(edits st: State, words: list[string], id: int, path: string): void {
+func add_to_batch(edits st: State, words: CommandLine, id: int, path: string): void {
     if (st.pending_size[id] + path.len() + 1 > BATCH_LIMIT) {
         flush_batch(edits: st, id);
     }
@@ -268,7 +267,7 @@ pub func list_names(path: string): list[string] {
     var names: list[string] = [];
     try {
         names = listDir(path);
-    } catch (Exception as e) {
+    } catch {
         let none: list[string] = [];
         names = none;
     }
@@ -285,6 +284,10 @@ pub func evaluate(e: Expr, entry: Entry, edits st: State): bool {
         },
         Path(pattern) => {
             return glob_match(pattern, entry.path, false);
+        },
+        PathRegex(pattern, re, fold) => {
+            let subject: string = if (fold) { entry.path.toLowerCase() } else { entry.path };
+            return re.isMatch(subject);
         },
         Kind(kinds) => {
             return entry.kind != "o" and kinds.index_of(entry.kind) >= 0;

@@ -5,7 +5,7 @@
 # exit status.
 #
 # Runtime: host.dual. Compiled into the native binary build/find by
-# `make build`; `loup run source/main.loup` interprets the same code, and
+# `make build`; Stage0 interprets the same code for `make run`, and
 # tests/app_test.loup calls run() directly under Stage0 (`make test`).
 
 from appinfo import (APP_NAME, EXIT_OK, EXIT_FAILURE, EXIT_USAGE);

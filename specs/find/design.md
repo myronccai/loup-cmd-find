@@ -82,8 +82,11 @@ use it; `run_find` uses the printing mode.
   without loop detection (a loop ends at the kernel's symlink limit).
 - Unsupported: tests on metadata (`-size`, `-mtime`, `-newer`, `-perm`,
   `-user`, ...; T1), `-type` letters other than `f` and `d`, `-delete`,
-  `-execdir`, `-ok`, `-printf`, `-regex`, the `,` operator, `-depth`, `-D`
-  and `-O`.
+  `-execdir`, `-ok`, `-printf`, the `,` operator, `-depth`, `-D` and `-O`.
+- `-regex`/`-iregex` (added later) translate GNU's emacs and
+  posix-extended syntaxes into `system.regex` (`commands/regex.loup`) and
+  compile each pattern once while parsing; `-regextype` accepts only those
+  two (and their aliases). Back-references are refused.
 - The output of `-exec` commands is collected and printed when the command
   ends, as UTF-8 text (invalid bytes are replaced), not streamed.
 - `--version` prints one line; `--help` is shorter.

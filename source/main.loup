@@ -5,11 +5,12 @@
 # argument list.
 #
 # Runtime: host.dual. The entry point: main() gets the command line. The same
-# source runs two ways: `loup run source/main.loup` (`make run`) interprets
-# it in the scripted runtime, and `make build` compiles it with the rest of
-# source/ into the native binary build/find, which `make e2e` then tests.
-# The binary is the reference: under `loup run`, listDir leaves out
-# dot-files and exec() joins its argv into a shell line without quoting.
+# source runs two ways: `make build` compiles it with the rest of source/
+# into the native binary build/find, which `make e2e` then tests, and
+# `make run` interprets it with Stage0 (`loup-bootstrap run
+# source/main.loup`). Not with the self-hosted `loup run`: there listDir
+# leaves out dot-files and exec() passes its argv through a shell inside
+# double quotes, so -exec arguments holding `"`, `$` or backquotes break.
 
 from cli.app import (run);
 

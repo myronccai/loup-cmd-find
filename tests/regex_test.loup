@@ -1,0 +1,96 @@
+@mode(host.dual)
+
+# Unit tests for the -regex translation (source/commands/regex.loup): the
+# -regextype names, the emacs and posix-extended syntaxes, sets, case
+# folding and GNU's error messages. Translations are run through
+# system.regex, so the tests check what matches, not only the text.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this file
+# with Stage0 (`loup-bootstrap test`, source/ on LOUPPATH), one test per
+# `func test_*()`. It is not part of the binary.
+
+from debug.assert import (expect, expectEq);
+from system.regex import (Regex);
+from commands.regex import (regex_syntax, translate_regex, ordinary, class_members, BACKREF_MESSAGE);
+
+# Whether `path` matches `pattern` (lowered first for -iregex, as find.loup
+# does).
+func matches(pattern: string, syntax: string, fold: bool, path: string): bool {
+    let re = Regex(translate_regex(pattern, syntax, fold).unwrap());
+    let subject: string = if (fold) { path.toLowerCase() } else { path };
+    return re.isMatch(subject);
+}
+
+func error_of(pattern: string, syntax: string): string {
+    return translate_regex(pattern, syntax, false).unwrap_err();
+}
+
+func test_syntax_names(): void {
+    expectEq(regex_syntax("emacs").unwrap(), "emacs", "emacs");
+    expectEq(regex_syntax("findutils-default").unwrap(), "emacs", "GNU's default");
+    expectEq(regex_syntax("posix-extended").unwrap(), "ere", "ERE");
+    expectEq(regex_syntax("egrep").unwrap(), "ere", "egrep");
+    expectEq(regex_syntax("sed").unwrap_err(), "-regextype sed is not supported: use emacs (the default) or posix-extended", "a GNU type not supported here");
+    expect(regex_syntax("foo").unwrap_err().startsWith("Unknown regular expression type 'foo'; valid types are 'findutils-default', 'ed', "), "unknown");
+}
+
+func test_whole_path_must_match(): void {
+    expectEq(translate_regex("a.c", "emacs", false).unwrap(), "^(?:a.c)$", "anchored");
+    expect(matches("t/a.c", "emacs", false, "t/a.c"), "the whole path");
+    expect(!matches("a.c", "emacs", false, "t/a.c"), "not a part of it");
+}
+
+func test_emacs_syntax(): void {
+    expect(matches(".*\\.\\(c\\|h\\)", "emacs", false, "t/b.h"), "\\( \\| \\)");
+    expect(!matches(".*\\.(c|h)", "emacs", false, "t/a.c"), "( | ) are ordinary");
+    expect(matches(".*/(p)\\.txt", "emacs", false, "t/(p).txt"), "literal parentheses");
+    expect(matches(".*/x{2}", "emacs", false, "t/x{2}"), "no intervals");
+    expect(matches(".*/a+", "emacs", false, "t/aa"), "+ repeats");
+    expect(matches("*a", "emacs", false, "*a"), "a leading * is ordinary");
+    expect(matches(".*/a**", "emacs", false, "t/aa"), "a repeated repetition compiles");
+    expect(matches("\\(ab\\)*", "emacs", false, "abab"), "a repeated group");
+    expect(!matches(".*[[:digit:]]", "emacs", false, "t/x1"), "no classes");
+    expect(matches("t/^a", "emacs", false, "t/^a"), "^ in the middle is ordinary");
+    expect(matches(".*\\<b\\.h", "emacs", false, "t/b.h"), "word start");
+}
+
+func test_posix_extended_syntax(): void {
+    expect(matches(".*\\.(c|h)", "ere", false, "t/a.c"), "groups and alternatives");
+    expect(matches(".*/a{2}", "ere", false, "t/aa"), "intervals");
+    expect(matches(".*/a{2,}", "ere", false, "t/aaa"), "open intervals");
+    expect(matches(".*/x\\{2\\}", "ere", false, "t/x{2}"), "escaped braces");
+    expect(matches(".*[[:digit:]]", "ere", false, "t/x1"), "classes");
+    expect(matches(".*)", "ere", false, "t/a)"), "an unmatched ) is ordinary");
+}
+
+func test_sets(): void {
+    expect(matches(".*/[a-c]\\..", "emacs", false, "t/b.h"), "range");
+    expect(matches(".*/[^/]*\\.c", "emacs", false, "t/sub/d.c"), "negated set");
+    expect(!matches(".*/[^/]*\\.c", "emacs", false, "t/s/u/"), "negated set refuses");
+    expect(matches(".*[\\]", "emacs", false, "a\\"), "a backslash is ordinary in a set");
+    expect(matches("[]a]*", "emacs", false, "]a]"), "] first is a member");
+    expect(matches("[a-]*", "emacs", false, "a-a"), "- last is a member");
+    expectEq(ordinary("."), "\\.", "punctuation escaped");
+    expectEq(ordinary("_"), "_", "underscore kept");
+    expectEq(class_members("nope"), "", "unknown class");
+}
+
+func test_fold_case(): void {
+    expect(matches(".*\\.c", "emacs", true, "t/C.C"), "-iregex");
+    expect(matches(".*/[[:upper:]]\\.c", "ere", true, "t/a.c"), "upper folds to letters");
+    expect(!matches(".*\\.c", "emacs", false, "t/C.C"), "-regex keeps case");
+    expect(!matches(".*\\W", "emacs", true, "t/ab"), "escapes are not lowered");
+}
+
+func test_errors(): void {
+    expectEq(error_of("\\(", "emacs"), "Unmatched ( or \\(", "open group");
+    expectEq(error_of(".*\\)", "emacs"), "Unmatched ) or \\)", "close group");
+    expectEq(error_of("[", "emacs"), "Unmatched [, [^, [:, [., or [=", "set");
+    expectEq(error_of(".*\\", "emacs"), "Trailing backslash", "backslash");
+    expectEq(error_of("*a", "ere"), "Invalid preceding regular expression", "leading * in ERE");
+    expectEq(error_of("a{2", "ere"), "Unmatched \\{", "interval");
+    expectEq(error_of("a{x}", "ere"), "Invalid content of \\{\\}", "interval content");
+    expectEq(error_of(".*/a\\1", "emacs"), BACKREF_MESSAGE, "back-reference");
+    expectEq(error_of("[[:nope:]]", "ere"), "Invalid character class name", "class");
+    expectEq(error_of("[b-a]", "emacs"), "Invalid range end", "range");
+}

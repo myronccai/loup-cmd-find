@@ -103,6 +103,15 @@ check "-name negated set"  0 $'t/.hidden\nt/Notes.TXT\nt/sub/b.c\nt/sub/deep/c.c
 check "-name class"        0 $'t/Notes.TXT\n'                           t -name '[[:upper:]]*'
 check "-path"              0 $'t/sub/deep/c.c\nt/sub/deep/d.txt\n'      t -path '*/deep/*'
 check "-path star spans /" 0 $'t/sub/b.c\nt/sub/deep/c.c\n'             t -path 't*.c'
+check "-regex"             0 $'t/sub/b.c\nt/sub/deep/c.c\n'      t -regex '.*\.c'
+check "-regex whole path"  0 ''                                         t -regex 'b\.c'
+check "-regex emacs group" 0 $'t/sub/b.c\nt/sub/deep/c.c\nt/sub/deep/d.txt\n' t -regex '.*/[bcd]\.\(c\|txt\)'
+check "-regex emacs ( |"   0 ''                                         t -regex '.*\.(c|txt)'
+check "-regex space"       0 $'t/space dir/e f.txt\n'                  t -regex '.*/e f\..*'
+check "-regex dot-file"    0 $'t/.hidden\n'                            t -regex '.*/\.h.*'
+check "-iregex"            0 $'t/Notes.TXT\n'                          t -iregex '.*/notes\..*'
+check "-regextype ERE"     0 $'t/sub/b.c\nt/sub/deep/c.c\nt/sub/deep/d.txt\n' t -regextype posix-extended -regex 't/sub/(deep/)?[a-z]+\.[a-z]{1,3}'
+check "-regextype class"   0 $'t/Notes.TXT\n'                          t -regextype posix-extended -regex '.*/[[:upper:]].*'
 check "-type d"            0 $'t\nt/emptydir\nt/space dir\nt/sub\nt/sub/deep\n' t -type d
 check "-type f,d"          0 "$all"                                     t -type f,d
 check "-empty"             0 $'t/empty.txt\nt/emptydir\n'               t -empty
@@ -190,6 +199,11 @@ check_err "unsupported -type" 1 "find: -type l is not supported: only f and d ca
 check_err "bad -maxdepth"     1 "find: Expected a positive decimal integer argument to -maxdepth, but got 'x'" t -maxdepth x
 check_err "unterminated exec" 1 "find: missing argument to \`-exec'"    t -exec echo {}
 check_err "two {} with +"     1 "find: Only one instance of {} is supported with -exec ... +" t -exec echo {} {} +
+check_err "bad -regex"        1 "find: failed to compile regular expression '\\(': Unmatched ( or \\(" t -regex '\('
+check_err "ERE leading *"     1 "find: failed to compile regular expression '*a': Invalid preceding regular expression" t -regextype posix-extended -regex '*a'
+check_err "missing -regex"    1 "find: missing argument to \`-regex'"   t -regex
+check_err "unknown -regextype" 1 "find: Unknown regular expression type 'foo'; valid types are 'findutils-default', 'ed', 'emacs', 'gnu-awk', 'grep', 'posix-awk', 'awk', 'posix-basic', 'posix-egrep', 'egrep', 'posix-extended', 'posix-minimal-basic', 'sed'." t -regextype foo
+check_err "other -regextype"  1 "find: -regextype sed is not supported: use emacs (the default) or posix-extended" t -regextype sed -regex x
 check "errors print nothing"  1 ''                                     t -name
 
 # Help and version.

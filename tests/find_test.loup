@@ -117,3 +117,22 @@ func test_const(): void {
     expectEq(run_on(["-false"], [file("a", 1)]).out.len(), 0, "-false");
     expectEq(run_on(["-true"], [file("a", 1)]).out.len(), 1, "-true");
 }
+
+func test_regex_matches_the_whole_path(): void {
+    let q = parse_expression(["-regex", ".*/[a-z]+\\.c"]).unwrap();
+    var st = new_state(true, 0);
+    expect(evaluate(q.root, file("src/main.c", 1), edits: st), "a match");
+    expect(!evaluate(q.root, file("src/main.c.bak", 1), edits: st), "the whole path must match");
+    let folded = parse_expression(["-iregex", ".*\\.C"]).unwrap();
+    expect(evaluate(folded.root, file("src/main.c", 1), edits: st), "-iregex ignores case");
+}
+
+# -regextype changes only the -regex tests that come after it.
+func test_regextype_applies_to_later_tests(): void {
+    let before = parse_expression(["-regex", "x|y", "-regextype", "posix-extended"]).unwrap();
+    let after = parse_expression(["-regextype", "posix-extended", "-regex", "x|y"]).unwrap();
+    var st = new_state(true, 0);
+    expect(evaluate(before.root, file("x|y", 0), edits: st), "emacs: | is ordinary");
+    expect(!evaluate(before.root, file("y", 0), edits: st), "emacs: no alternatives");
+    expect(evaluate(after.root, file("y", 0), edits: st), "ERE: | separates alternatives");
+}

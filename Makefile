@@ -17,9 +17,14 @@ TEST_ARGS      ?=
 
 all: build
 
-# Run from source, e.g. `make run ARGS="source -name '*.loup'"`.
+# Run from source, e.g. `make run ARGS="source -name '*.loup'"`. This uses
+# Stage0's interpreter: under the self-hosted `loup run` of Loup 1.26.0,
+# io.fs.listDir leaves out dot-files, and exec() passes a child's arguments
+# through a shell inside double quotes, so -exec arguments holding `"`, `$`
+# or backquotes break. Stage0 lists every entry and passes argv exactly, as
+# the native binary does.
 run:
-	$(LOUP) run source/main.loup -- $(ARGS)
+	$(LOUP_BOOTSTRAP) run source/main.loup -- $(ARGS)
 
 # Type-check source/main.loup and every module it imports.
 check:

@@ -73,7 +73,7 @@ license: <https://code-craft.ai/loup/license>.
 ```sh
 make build                                # native binary: build/find
 make ci                                   # check, unit tests, build, end-to-end tests
-make run ARGS="source -name '*.loup'"     # run from source with loup run
+make run ARGS="source -name '*.loup'"     # run from source (Stage0's loup-bootstrap run)
 ```
 
 ```text
@@ -109,6 +109,14 @@ demo/src/util.c
 demo/src/util.h
 $ build/find demo -maxdepth 1 ! -type d
 demo/README.md
+$ build/find demo -regex '.*/[a-z]+\.\(c\|h\)'
+demo/src/main.c
+demo/src/util.c
+demo/src/util.h
+$ build/find demo -regextype posix-extended -iregex '.*/(readme|main)\..*'
+demo/README.md
+demo/build/main.o
+demo/src/main.c
 $ build/find demo -name '*.c' -o
 find: expected an expression after '-o'
 $ build/find nowhere; echo "status $?"
@@ -122,9 +130,9 @@ entries for which it is true.
 
 | Kind | Supported |
 |---|---|
-| Tests | `-name PATTERN`, `-iname PATTERN`, `-path PATTERN`, `-type f\|d` (or `f,d`), `-empty`, `-true`, `-false` |
+| Tests | `-name PATTERN`, `-iname PATTERN`, `-path PATTERN`, `-regex PATTERN`, `-iregex PATTERN`, `-type f\|d` (or `f,d`), `-empty`, `-true`, `-false` |
 | Operators | `( EXPR )`, `! EXPR`, `-not EXPR`, `EXPR -a EXPR` (`-and`, or nothing), `EXPR -o EXPR` (`-or`) |
-| Global options | `-maxdepth N`, `-mindepth N` |
+| Global options | `-maxdepth N`, `-mindepth N`, `-regextype emacs\|posix-extended` |
 | Actions | `-print`, `-print0`, `-prune`, `-exec COMMAND ;`, `-exec COMMAND {} +` |
 | Symbolic links | `-P` (default: do not follow), `-H` (follow for the starting points), `-L` (follow) |
 | Other | `--help`, `--version` (also `-help`, `-version`) |
@@ -132,6 +140,14 @@ entries for which it is true.
 Patterns are shell wildcards: `*`, `?`, `[abc]`, `[!abc]`, `[a-z]`,
 `[[:digit:]]`, and `\` to quote the next character. `*` matches a leading
 `.` and, for `-path`, `/`.
+
+`-regex` and `-iregex` take a regular expression that must match the whole
+path, as in GNU find. The default syntax is GNU's `emacs` style: `\(` `\)`
+group, `\|` separates alternatives, `* + ?` repeat, and `( ) | { }` are
+ordinary characters. After `-regextype posix-extended` (or `posix-egrep`,
+`egrep`), `( ) | {m,n} + ?` are operators and sets take classes such as
+`[[:digit:]]`. Both take `.`, `^`, `$`, `[...]` and GNU's `\w \W \s \S \b \B
+\< \>` escapes.
 
 Exit status: `0` on success; `1` if a starting point is missing, a directory
 cannot be read, an `-exec ... {} +` command fails, or the command line is
@@ -154,7 +170,15 @@ wrong.
     would abort on one that cannot be read), which is slow on large trees.
     Put `-type d` first to test only directories.
 - Not implemented: `-delete`, `-execdir`, `-ok`, `-printf`, `-fprint`,
-  `-regex`, `-depth`, `-xdev`, the `,` operator, `-D` and `-O`.
+  `-depth`, `-xdev`, the `,` operator, `-D` and `-O`.
+- `-regextype` accepts `emacs` (also `findutils-default`) and
+  `posix-extended` (also `posix-egrep`, `egrep`); GNU's other types are
+  refused with a message. Back-references (`\1` to `\9`) are not
+  supported, POSIX classes are ASCII only, and `-iregex` folds case by
+  lowering the pattern's letters and the path. The regular expressions run
+  on `system.regex`, whose error messages GNU's are mapped onto only for
+  the common mistakes (unmatched brackets and groups, a trailing
+  backslash).
 - `-exec` runs the command without a shell, as GNU find does, but collects
   its output and prints it when the command ends instead of streaming it;
   the output is treated as UTF-8 text.
@@ -171,6 +195,7 @@ source/cli/usage.loup         # --help and --version text
 source/cli/app.loup           # run(): parse, dispatch, exit status
 source/commands/expr.loup     # enum Expr and the recursive-descent parser
 source/commands/glob.loup     # wildcard matching
+source/commands/regex.loup    # -regex: GNU's emacs and posix-extended syntax to system.regex
 source/commands/find.loup     # walk, evaluation, -exec
 tests/*_test.loup             # unit tests (make test)
 tests/e2e.sh                  # end-to-end tests of build/find (make e2e)
