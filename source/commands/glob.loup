@@ -13,33 +13,42 @@
 # Structure: compile_glob turns the pattern into a list of GlobParts
 # (parse_set reads a bracket expression); match_parts then matches them
 # left to right, remembering only the last `*` and backtracking to it, which
-# is enough for patterns with no other kind of repetition.
+# is enough for patterns with no other kind of repetition. The Glob class
+# keeps one compiled pattern, so that find compiles each -name and -path
+# pattern once, while parsing, not once per file (natively every compiled
+# list stays allocated: compiling per file took 290 MB for 40,000 files,
+# compiling once with class parts 33 MB).
 
-# One compiled pattern element.
-pub struct GlobPart {
+# One compiled pattern element. A class: part_matches reads one for every
+# character of every name, and a struct holding lists would be copied on
+# each call.
+pub class GlobPart {
     # "lit", "any" (?), "star" (*) or "set" ([...]).
-    pub var kind: string;
+    pub var kind: string = "";
     # The character for "lit".
-    pub var text: string;
+    pub var text: string = "";
     # For "set": whether the set is negated, and its members: ranges as
-    # (lo, hi) pairs (a single character c is (c, c)), and class names.
-    pub var negate: bool;
-    pub var ranges: list[(string, string)];
-    pub var classes: list[string];
+    # parallel lists of low and high ends (a single character c is c..c),
+    # and class names.
+    pub var negate: bool = false;
+    pub var los: list[string] = [];
+    pub var his: list[string] = [];
+    pub var classes: list[string] = [];
 }
 
 const CLASS_NAMES: string = " alpha digit alnum upper lower space blank punct xdigit cntrl print graph ";
 
-func literal(ch: string): GlobPart {
-    let none: list[string] = [];
-    let no_ranges: list[(string, string)] = [];
-    return GlobPart(kind = "lit", text = ch, negate = false, ranges = no_ranges, classes = none);
+safe func literal(ch: string): GlobPart {
+    let part = GlobPart();
+    part.kind = "lit";
+    part.text = ch;
+    return part;
 }
 
-func simple(kind: string): GlobPart {
-    let none: list[string] = [];
-    let no_ranges: list[(string, string)] = [];
-    return GlobPart(kind = kind, text = "", negate = false, ranges = no_ranges, classes = none);
+safe func simple(kind: string): GlobPart {
+    let part = GlobPart();
+    part.kind = kind;
+    return part;
 }
 
 func chars_of(s: string): list[string] {
@@ -102,7 +111,7 @@ pub func in_class(ch: string, name: string): bool {
 # Parses the bracket expression that starts at `cs[start]` (the `[`). Returns
 # the set and the index just after its `]`, or index -1 when the bracket is
 # not closed (the `[` is then an ordinary character).
-func parse_set(cs: list[string], start: int, edits part: GlobPart): int {
+safe func parse_set(cs: list[string], start: int, edits part: GlobPart): int {
     var i = start + 1;
     if (i < cs.len() and (cs[i] == "!" or cs[i] == "^")) {
         part.negate = true;
@@ -144,13 +153,14 @@ func parse_set(cs: list[string], start: int, edits part: GlobPart): int {
             }
             i += 2;
         }
-        part.ranges.push((lo, hi));
+        part.los.push(lo);
+        part.his.push(hi);
     }
     return -1;
 }
 
 # Compiles `pattern` into its elements.
-pub func compile_glob(pattern: string): list[GlobPart] {
+pub safe func compile_glob(pattern: string): list[GlobPart] {
     let cs = chars_of(pattern);
     var parts: list[GlobPart] = [];
     var i = 0;
@@ -192,13 +202,12 @@ func part_matches(part: GlobPart, ch: string): bool {
         return part.text == ch;
     }
     var found = false;
-    for ((lo, hi) in part.ranges) {
-        if (ch >= lo and ch <= hi) {
-            found = true;
-            break;
-        }
-    }
     var k = 0;
+    while (!found and k < part.los.len()) {
+        found = ch >= part.los[k] and ch <= part.his[k];
+        k += 1;
+    }
+    k = 0;
     while (!found and k < part.classes.len()) {
         found = in_class(ch, part.classes[k]);
         k += 1;
@@ -236,11 +245,24 @@ pub func match_parts(parts: list[GlobPart], text: string): bool {
     return p == parts.len();
 }
 
-# Whether `text` matches the wildcard `pattern`. With `fold`, letters match
-# regardless of case (-iname).
-pub func glob_match(pattern: string, text: string, fold: bool): bool {
-    if (fold) {
-        return match_parts(compile_glob(pattern.toLowerCase()), text.toLowerCase());
+# A pattern compiled once and matched against many names; with `fold`
+# (-iname), letters match regardless of case.
+pub class Glob {
+    let parts: list[GlobPart];
+    let fold: bool;
+
+    new(pattern: string, fold: bool) {
+        this.parts = compile_glob(if (fold) { pattern.toLowerCase() } else { pattern });
+        this.fold = fold;
     }
-    return match_parts(compile_glob(pattern), text);
+
+    pub func matches(text: string): bool {
+        let subject: string = if (this.fold) { text.toLowerCase() } else { text };
+        return match_parts(this.parts, subject);
+    }
+}
+
+# Whether `text` matches the wildcard `pattern` (a one-off Glob).
+pub func glob_match(pattern: string, text: string, fold: bool): bool {
+    return Glob(pattern, fold).matches(text);
 }

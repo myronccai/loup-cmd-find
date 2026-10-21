@@ -8,7 +8,7 @@
 # `func test_*()`. It is not part of the binary.
 
 from debug.assert import (expect);
-from commands.glob import (glob_match, in_class);
+from commands.glob import (Glob, glob_match, in_class);
 
 func test_literal_and_question_mark(): void {
     expect(glob_match("a.txt", "a.txt", false), "exact");
@@ -59,4 +59,13 @@ func test_classes(): void {
     expect(in_class(" ", "space") and in_class("\t", "blank"), "spaces");
     expect(in_class("!", "punct") and !in_class("a", "punct"), "punctuation");
     expect(in_class("f", "xdigit") and !in_class("g", "xdigit"), "hex digits");
+}
+
+# One compiled Glob serves every name, as find uses it.
+func test_compiled_once(): void {
+    let g = Glob("[ab]*.[ch]", false);
+    expect(g.matches("a.c") and g.matches("bee.h"), "matches");
+    expect(!g.matches("c.c") and !g.matches("a.o"), "refuses");
+    let folded = Glob("README*", true);
+    expect(folded.matches("readme.md") and folded.matches("ReadMe"), "-iname");
 }

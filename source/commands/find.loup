@@ -25,7 +25,6 @@
 from appinfo import (EXIT_OK, EXIT_FAILURE);
 from cli.args import (Options);
 from commands.expr import (Expr, Query);
-from commands.glob import (glob_match);
 from core.shlex import (join as shell_join);
 from io.fs import (listDir, isDir, isFile, exists);
 from io.proc import (exitCode);
@@ -279,11 +278,11 @@ pub func list_names(path: string): list[string] {
 # short-circuit, so an action runs only when everything before it is true.
 pub func evaluate(e: Expr, entry: Entry, edits st: State): bool {
     match e {
-        Name(pattern, fold) => {
-            return glob_match(pattern, entry.name, fold);
+        Name(pattern, glob, fold) => {
+            return glob.matches(entry.name);
         },
-        Path(pattern) => {
-            return glob_match(pattern, entry.path, false);
+        Path(pattern, glob) => {
+            return glob.matches(entry.path);
         },
         PathRegex(pattern, re, fold) => {
             let subject: string = if (fold) { entry.path.toLowerCase() } else { entry.path };

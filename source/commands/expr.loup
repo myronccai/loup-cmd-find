@@ -26,12 +26,14 @@
 
 from system.regex import (Regex);
 from commands.regex import (regex_syntax, translate_regex);
+from commands.glob import (Glob);
 
 pub enum Expr {
-    # -name / -iname PATTERN: the pattern and whether case is ignored.
-    Name(string, bool),
-    # -path PATTERN, matched against the whole path.
-    Path(string),
+    # -name / -iname PATTERN: the pattern as given, compiled once here, and
+    # whether case is ignored.
+    Name(string, Glob, bool),
+    # -path PATTERN, matched against the whole path (compiled likewise).
+    Path(string, Glob),
     # -regex / -iregex PATTERN: the pattern as given, compiled once here
     # (see commands/regex.loup), and whether case is ignored.
     PathRegex(string, Regex, bool),
@@ -299,11 +301,11 @@ func parse_primary(edits p: Parser): Result[Expr, string] {
     }
     if (t == "-name" or t == "-iname") {
         let pattern = take_argument(edits: p, t)?;
-        return Ok(Expr.Name(pattern, t == "-iname"));
+        return Ok(Expr.Name(pattern, Glob(pattern, t == "-iname"), t == "-iname"));
     }
     if (t == "-path") {
         let pattern = take_argument(edits: p, t)?;
-        return Ok(Expr.Path(pattern));
+        return Ok(Expr.Path(pattern, Glob(pattern, false)));
     }
     if (t == "-type") {
         let text = take_argument(edits: p, t)?;
@@ -391,10 +393,10 @@ pub func parse_expression(tokens: list[string]): Result[Query, string] {
 pub func show(e: Expr): string {
     var out = "";
     match e {
-        Name(pattern, fold) => {
+        Name(pattern, glob, fold) => {
             out = if (fold) { "iname(" + pattern + ")" } else { "name(" + pattern + ")" };
         },
-        Path(pattern) => { out = "path(" + pattern + ")"; },
+        Path(pattern, glob) => { out = "path(" + pattern + ")"; },
         PathRegex(pattern, re, fold) => {
             out = if (fold) { "iregex(" + pattern + ")" } else { "regex(" + pattern + ")" };
         },
